@@ -1,4 +1,4 @@
-# DAPR U-Net benchmark repository
+# BT U-Net benchmark repository
 
 This repository keeps one active proposal method:
 
