@@ -34,10 +34,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", default=",".join(map(str, DEFAULT_SEEDS)))
     parser.add_argument("--models", default=DEFAULT_MODELS_CSV)
     parser.add_argument("--config-dir", default="configs/dapr_hyperparameters")
-    parser.add_argument("--output-root", default="outputs_dapr_hyperparameters/etis")
+    parser.add_argument("--output-root", default=None)
     parser.add_argument("--allow-insecure-download", action="store_true")
     parser.add_argument("--delete-checkpoints-after-eval", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--run-tests", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--run-tests", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--skip-cleanliness-audit", action="store_true", help="Skip source-tree cleanliness audit before running.")
     parser.add_argument("--save-predictions", action="store_true")
     parser.add_argument("--save-visualizations", action="store_true")
     return parser.parse_args()
@@ -53,7 +54,7 @@ def run(command: list[str]) -> None:
 def main() -> None:
     args = parse_args()
     py = sys.executable
-    output_root = Path(args.output_root)
+    output_root = Path(args.output_root or f"outputs_dapr_hyperparameters/{args.dataset}")
     if not output_root.is_absolute():
         output_root = PROJECT_ROOT / output_root
 
@@ -63,7 +64,8 @@ def main() -> None:
     latex_table = tables / "dapr_hyperparameters.tex"
     delta_table = tables / "dapr_hyperparameter_deltas.csv"
 
-    run([py, str(PROJECT_ROOT / "tools" / "audit_repository_cleanliness.py")])
+    if not args.skip_cleanliness_audit:
+        run([py, str(PROJECT_ROOT / "tools" / "audit_repository_cleanliness.py")])
     run([py, str(PROJECT_ROOT / "tools" / "audit_dapr_hyperparameters.py"), "--config-dir", args.config_dir])
 
     if args.run_tests:

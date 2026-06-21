@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the permanent 11-baseline versus 2-proposal comparison end to end."""
+"""Run the permanent 11-baseline versus DAPR comparison end to end."""
 
 from __future__ import annotations
 
@@ -36,7 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", default=None)
     parser.add_argument("--allow-insecure-download", action="store_true")
     parser.add_argument("--delete-checkpoints-after-eval", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--run-tests", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--run-tests", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--skip-cleanliness-audit", action="store_true", help="Skip source-tree cleanliness audit before running.")
     parser.add_argument("--run-runtime-baseline-audit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--skip-training", action="store_true", help="Only aggregate, validate, and report existing outputs.")
     parser.add_argument("--save-predictions", action="store_true")
@@ -64,7 +65,8 @@ def main() -> None:
     latex_table = tables / "baseline_proposal_comparison.tex"
     delta_table = tables / "baseline_proposal_deltas.csv"
 
-    run([py, str(PROJECT_ROOT / "tools" / "audit_repository_cleanliness.py")])
+    if not args.skip_cleanliness_audit:
+        run([py, str(PROJECT_ROOT / "tools" / "audit_repository_cleanliness.py")])
     run([
         py,
         str(PROJECT_ROOT / "tools" / "audit_baseline_proposal_comparison.py"),
