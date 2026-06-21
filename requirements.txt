@@ -1,13 +1,18 @@
 # Core deep learning
-# Note: If you need a specific CUDA build of PyTorch, install torch/torchvision
-# from the official PyTorch index before or instead of this line.
+# If you need a specific CUDA build, install torch/torchvision from the official
+# PyTorch index before or instead of these lines.
 torch>=2.2.0
+torchvision>=0.17.0
 
 # Numeric / image / config utilities
-numpy>=1.24.0
+# numpy<2.2 avoids conflicts with TensorFlow/Kaggle images while remaining
+# compatible with the segmentation pipeline.
+numpy>=1.24.0,<2.2.0
 Pillow>=10.0.0
 PyYAML>=6.0.1
 requests>=2.31.0
-
+certifi>=2024.0.0
 gdown>=5.2.0
 
+# Test/audit utilities
+pytest>=8.0.0
