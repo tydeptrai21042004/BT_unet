@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Create deterministic train/val/test splits for segmentation datasets."""
+
+from __future__ import annotations
+
+import argparse
+import random
+import sys
+from pathlib import Path
+from typing import List, Optional, Sequence, Tuple
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.datasets import canonical_sample_id, infer_dataset_paths, normalize_dataset_name
+
+VALID_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif"}
+
+
+def _is_image(path: Path) -> bool:
+    return path.suffix.lower() in VALID_EXTS
+
+
+def _resolve_image_dir(data_root: Path, dataset_name: str, image_size: Optional[int] = None) -> Path:
+    inferred = infer_dataset_paths(data_root, dataset_name=dataset_name, image_size=image_size)
+    return inferred.image_dir
+
+
+def _collect_ids(image_dir: Path) -> List[str]:
+    ids = {canonical_sample_id(p.stem) for p in image_dir.rglob("*") if p.is_file() and _is_image(p)}
+    return sorted(ids)
+
+
+def _split_ids(
+    ids: Sequence[str],
+    train_ratio: float,
+    val_ratio: float,
+    seed: int,
+    strategy: str = "random",
+) -> Tuple[List[str], List[str], List[str]]:
+    ids = sorted(ids)
+    if strategy == "random":
+        rng = random.Random(seed)
+        rng.shuffle(ids)
+    elif strategy != "contiguous":
+        raise ValueError(f"Unsupported split strategy: {strategy}")
+    n = len(ids)
+    n_train = int(round(n * train_ratio))
+    n_val = int(round(n * val_ratio))
+    n_train = min(max(n_train, 1), max(n - 2, 1)) if n >= 3 else max(n - 2, 0)
+    remaining = n - n_train
+    n_val = min(max(n_val, 1 if remaining >= 2 else 0), max(remaining - 1, 0))
+    train_ids = ids[:n_train]
+    val_ids = ids[n_train:n_train + n_val]
+    test_ids = ids[n_train + n_val:]
+    return sorted(train_ids), sorted(val_ids), sorted(test_ids)
+
+
+def _write_list(items: Sequence[str], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for item in items:
+            f.write(f"{item}\n")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Create deterministic train/val/test split text files.")
+    parser.add_argument("--dataset", type=str, default="kvasir_seg", help="Dataset key. Supports all datasets registered in src/datasets/registry.py.")
+    parser.add_argument("--data-root", type=str, default="data", help="Benchmark data root.")
+    parser.add_argument("--image-size", type=int, default=None, help="Preferred processed image size, e.g. 352.")
+    parser.add_argument("--train-ratio", type=float, default=0.8)
+    parser.add_argument("--val-ratio", type=float, default=0.1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--strategy",
+        choices=("random", "contiguous"),
+        default="random",
+        help=(
+            "random shuffles sample IDs deterministically; contiguous preserves sorted "
+            "slice order and is recommended for adjacent-volume datasets such as ISBI 2012."
+        ),
+    )
+    parser.add_argument("--output-dir", type=str, default=None, help="Defaults to <data-root>/splits/<dataset> so multiple datasets can coexist.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    dataset_name = normalize_dataset_name(args.dataset)
+    if args.train_ratio <= 0 or args.val_ratio < 0 or (args.train_ratio + args.val_ratio) >= 1:
+        raise ValueError("Require 0 < train_ratio, 0 <= val_ratio, and train_ratio + val_ratio < 1")
+
+    data_root = Path(args.data_root)
+    image_dir = _resolve_image_dir(data_root, dataset_name=dataset_name, image_size=args.image_size)
+    ids = _collect_ids(image_dir)
+    if len(ids) < 3:
+        raise RuntimeError(f"Need at least 3 samples to create train/val/test splits, found {len(ids)}")
+
+    train_ids, val_ids, test_ids = _split_ids(
+        ids,
+        args.train_ratio,
+        args.val_ratio,
+        args.seed,
+        strategy=args.strategy,
+    )
+    output_dir = Path(args.output_dir) if args.output_dir else data_root / "splits" / dataset_name
+    _write_list(train_ids, output_dir / "train.txt")
+    _write_list(val_ids, output_dir / "val.txt")
+    _write_list(test_ids, output_dir / "test.txt")
+
+    print(f"Saved splits to: {output_dir}")
+    print(f"dataset={dataset_name}")
+    print(f"strategy={args.strategy}")
+    print(f"train={len(train_ids)} val={len(val_ids)} test={len(test_ids)} total={len(ids)}")
+
+
+if __name__ == "__main__":
+    main()
