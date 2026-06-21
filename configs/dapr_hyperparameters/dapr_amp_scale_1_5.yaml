@@ -1,0 +1,73 @@
+ablation:
+  description: Full DAPR U-Net with direct amplitude--phase reconstruction.
+  group: dapr_component
+data:
+  augmentation: strong
+  batch_size: 6
+  image_size: 352
+  num_workers: 4
+  pin_memory: true
+  root: data
+eval:
+  device: null
+  loss: bce_dice
+  threshold: 0.5
+experiment:
+  name: dapr_amp_scale_1_5
+  output_root: outputs_dapr_hyperparameters
+model:
+  act: relu
+  channels:
+  - 32
+  - 64
+  - 128
+  - 256
+  - 512
+  decoder_use_cbam: false
+  fourier_alpha: 0.5
+  fourier_alpha_start: 0.5
+  fourier_alpha_warmup_epochs: 0
+  fourier_amplitude_scale: 1.5
+  fourier_block_act: gelu
+  fourier_block_norm: gn
+  fourier_dropout: 0.1
+  fourier_expansion: 1.5
+  fourier_init_hw:
+  - 22
+  - 22
+  fourier_phase_max: 3.141592653589793
+  fourier_residual: false
+  fourier_use_amplitude: true
+  fourier_use_channel_mixing: true
+  fourier_use_phase: true
+  fourier_zero_init_output: false
+  in_channels: 3
+  name: dapr_amp_scale_1_5
+  norm: bn
+  num_classes: 1
+train:
+  aux_loss_weight: 0.0
+  aux_ramp_epochs: 0
+  aux_warmup_epochs: 0
+  deterministic: true
+  deterministic_warn_only: true
+  epochs: 30
+  eta_min: 1.0e-06
+  grad_clip: 1.0
+  gradient_accumulation_steps: 1
+  loss: bce_dice
+  lr: 0.0003
+  mixed_precision: false
+  optimizer: adamw
+  save_metric: dice
+  save_metric_mode: max
+  scheduler: cosine
+  seed: 42
+  t_max: 30
+  threshold: 0.5
+  use_aux_outputs_loss: false
+  use_boundary_loss: false
+  weight_decay: 0.0001
+hyperparameter:
+  group: dapr_sensitivity
+  description: Amplitude response scale 1.5.
