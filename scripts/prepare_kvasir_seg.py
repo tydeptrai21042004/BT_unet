@@ -44,6 +44,7 @@ from src.datasets.kvasir_seg_dataset import (
     _resolve_image_mask_dirs,
     canonical_sample_id,
     looks_like_mask_stem,
+    load_binary_mask,
 )
 
 VALID_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif"}
@@ -138,17 +139,16 @@ def _copy_raw_pairs(pairs: Sequence[Tuple[str, Path, Path]], raw_images: Path, r
 
 def _resize_pair(image_path: Path, mask_path: Path, out_image: Path, out_mask: Path, size: int) -> Tuple[int, int]:
     image = Image.open(image_path).convert("RGB")
-    mask = Image.open(mask_path).convert("L")
+    mask_binary = load_binary_mask(mask_path)
     orig_h, orig_w = image.height, image.width
 
     image_resized = image.resize((size, size), resample=Image.BILINEAR)
-    mask_resized = mask.resize((size, size), resample=Image.NEAREST)
-    mask_binary = mask_resized.point(lambda x: 255 if x > 127 else 0)
+    mask_resized = mask_binary.resize((size, size), resample=Image.NEAREST)
 
     out_image.parent.mkdir(parents=True, exist_ok=True)
     out_mask.parent.mkdir(parents=True, exist_ok=True)
     image_resized.save(out_image)
-    mask_binary.save(out_mask)
+    mask_resized.save(out_mask)
     return orig_h, orig_w
 
 

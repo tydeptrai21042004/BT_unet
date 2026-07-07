@@ -78,6 +78,26 @@ DATASET_SPECS = {
         official_source_url="https://datasets.simula.no/kvasir-instrument/",
         description="Kvasir-Instrument gastrointestinal endoscopic tool binary segmentation dataset.",
     ),
+    "bus_uclm": DatasetSpec(
+        name="bus_uclm",
+        aliases=(
+            "bus_uclm",
+            "bus-uclm",
+            "busuclm",
+            "breast_ultrasound_uclm",
+            "breast-ultrasound-uclm",
+        ),
+        canonical_dir="BUS-UCLM",
+        official_download_urls=(
+            "https://prod-dcd-datasets-cache-zipfiles.s3.eu-west-1.amazonaws.com/7fvgj4jsp7-1.zip",
+        ),
+        official_source_url="https://data.mendeley.com/datasets/7fvgj4jsp7/3",
+        description=(
+            "BUS-UCLM breast ultrasound lesion segmentation dataset. "
+            "Official Mendeley Data DOI: 10.17632/7fvgj4jsp7.3."
+        ),
+    ),
+
     "hyper_kvasir_seg": DatasetSpec(
         name="hyper_kvasir_seg",
         aliases=("hyper_kvasir_seg", "hyper-kvasir-seg", "hyper_kvasir_segmentation", "hyper-kvasir-segmentation"),

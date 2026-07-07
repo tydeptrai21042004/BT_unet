@@ -1,7 +1,7 @@
 """Dataset package for HF-U-Net benchmark."""
 
 from .factory import SUPPORTED_BINARY_SEG_DATASETS, build_dataset
-from .kvasir_seg_dataset import KvasirSegDataset, build_kvasir_datasets, canonical_sample_id, looks_like_mask_stem, infer_dataset_paths, infer_kvasir_paths
+from .kvasir_seg_dataset import KvasirSegDataset, build_kvasir_datasets, canonical_sample_id, looks_like_mask_stem, load_binary_mask, infer_dataset_paths, infer_kvasir_paths
 from .registry import DATASET_SPECS, DatasetSpec, SUPPORTED_DATASETS, get_dataset_spec, normalize_dataset_name
 from .transforms import (
     SegCompose,
@@ -24,6 +24,7 @@ __all__ = [
     "infer_kvasir_paths",
     "canonical_sample_id",
     "looks_like_mask_stem",
+    "load_binary_mask",
     "SUPPORTED_BINARY_SEG_DATASETS",
     "DATASET_SPECS",
     "SUPPORTED_DATASETS",

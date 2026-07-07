@@ -32,6 +32,13 @@ COMMON_DATASET_DIR_ALIASES: Dict[str, Tuple[str, ...]] = {
     "isbi2012": ("ISBI2012", "ISBI-2012", "ISBI_2012", "ISBI-2012-challenge"),
     "kvasir_instrument": ("Kvasir-Instrument", "kvasir-instrument", "kvasir_instrument"),
     "hyper_kvasir_seg": ("HyperKvasir-SEG", "hyper-kvasir-segmented-images", "segmented-images", "segmented_images"),
+    "bus_uclm": (
+        "BUS-UCLM",
+        "BUSUCLM",
+        "BUS-UCLM Breast ultrasound lesion segmentation dataset",
+        "Breast ultrasound lesion segmentation dataset",
+        "bus-uclm-dataset",
+    ),
 }
 
 
@@ -321,6 +328,23 @@ def infer_kvasir_paths(root: str | Path, image_size: Optional[int] = None) -> Kv
     return infer_dataset_paths(root=root, dataset_name="kvasir_seg", image_size=image_size)
 
 
+def load_binary_mask(path: str | Path) -> Image.Image:
+    """Load a mask as a binary PIL image.
+
+    Grayscale masks are thresholded at 127. RGB/RGBA masks, such as BUS-UCLM
+    red malignant and green benign annotations, are converted with the rule
+    ``any non-black pixel = foreground``. This preserves red masks whose
+    grayscale luminance would otherwise fall below a 127 threshold.
+    """
+    mask = Image.open(path)
+    if mask.mode in {"RGB", "RGBA"}:
+        rgb = mask.convert("RGB")
+        return rgb.point(lambda value: 255 if value > 0 else 0).convert("L").point(
+            lambda value: 255 if value > 0 else 0
+        )
+    return mask.convert("L").point(lambda value: 255 if value > 127 else 0)
+
+
 class KvasirSegDataset(Dataset):
     """Binary segmentation dataset for Kvasir-SEG or compatible image/mask layouts."""
 
@@ -458,7 +482,7 @@ class KvasirSegDataset(Dataset):
         sample_id, image_path, mask_path = self.samples[index]
 
         image = Image.open(image_path).convert("RGB")
-        mask = Image.open(mask_path).convert("L")
+        mask = load_binary_mask(mask_path)
 
         sample: Dict[str, object] = {
             "id": sample_id,
@@ -528,6 +552,7 @@ __all__ = [
     "KvasirSegDataset",
     "canonical_sample_id",
     "looks_like_mask_stem",
+    "load_binary_mask",
     "infer_dataset_paths",
     "infer_kvasir_paths",
     "build_kvasir_datasets",

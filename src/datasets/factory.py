@@ -16,6 +16,7 @@ SUPPORTED_BINARY_SEG_DATASETS = {
     "isbi2012",
     "kvasir_instrument",
     "hyper_kvasir_seg",
+    "bus_uclm",
 }
 
 
