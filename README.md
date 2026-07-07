@@ -59,6 +59,21 @@ python scripts/run_dapr_hyperparameters.py \
 
 This checks expansion ratio, amplitude scale, phase bound, and Fourier dropout under the same training and evaluation protocol.
 
+
+## BUS-UCLM DOI-backed dataset
+
+BUS-UCLM is registered as `bus_uclm` and can be prepared from the official Mendeley Data archive without Kaggle:
+
+```bash
+python scripts/prepare_dataset.py \
+  --dataset bus_uclm \
+  --data-root data \
+  --image-size 352 \
+  --force
+```
+
+See `docs/BUS_UCLM_GUIDE.md` for the DOI, official source, RGB mask conversion rule, split command, and efficiency-table benchmark command.
+
 ## Audit tools
 
 Before launching expensive experiments, run:
