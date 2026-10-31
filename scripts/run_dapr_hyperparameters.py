@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config-dir", default="configs/dapr_hyperparameters")
     parser.add_argument("--output-root", default=None)
     parser.add_argument("--allow-insecure-download", action="store_true")
-    parser.add_argument("--delete-checkpoints-after-eval", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--delete-checkpoints-after-eval", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--run-tests", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--skip-cleanliness-audit", action="store_true", help="Skip source-tree cleanliness audit before running.")
     parser.add_argument("--save-predictions", action="store_true")

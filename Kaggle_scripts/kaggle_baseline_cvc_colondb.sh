@@ -67,6 +67,16 @@ cd "${WORK_ROOT}"
 rm -rf "${REPO_DIR}"
 git clone --depth 1 "${REPO_URL}" "${REPO_DIR}"
 cd "${REPO_DIR}"
+# Optional: apply this patch-only ZIP to a freshly cloned upstream checkout.
+# The patch archive has one top-level BT_unet-main/ directory.
+if [[ -n "${BT_REVISION_PATCH_ZIP:-}" ]]; then
+    PATCH_TMP="$(mktemp -d)"
+    unzip -q "${BT_REVISION_PATCH_ZIP}" -d "${PATCH_TMP}"
+    test -d "${PATCH_TMP}/BT_unet-main" || { echo "Invalid BT revision patch ZIP" >&2; exit 1; }
+    cp -a "${PATCH_TMP}/BT_unet-main/." "${REPO_DIR}/"
+    rm -rf "${PATCH_TMP}"
+    echo "Applied revision patch from ${BT_REVISION_PATCH_ZIP}"
+fi
 echo "Commit: $(git rev-parse HEAD)"
 
 section "CLEAN CACHE"
@@ -165,7 +175,10 @@ for RAW_SEED in "${SEED_ARRAY[@]}"; do
         --skip-prepare \
         --skip-splits
 
-    find "${SEED_OUTPUT}" -type d -name "checkpoints" -prune -exec rm -rf {} +
+    # Revision evidence needs trained checkpoints. Set KEEP_CHECKPOINTS=0 to opt in to cleanup.
+    if [[ "${KEEP_CHECKPOINTS:-1}" == "0" ]]; then
+        find "${SEED_OUTPUT}" -type d -name "checkpoints" -prune -exec rm -rf {} +
+    fi
 done
 
 section "AGGREGATE AND REPORT"

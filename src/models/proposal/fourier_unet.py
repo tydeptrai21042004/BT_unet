@@ -36,6 +36,7 @@ class FourierSpectralBottleneck(nn.Module):
         use_channel_mixing: bool = True,
         residual: bool = True,
         zero_init_output: bool = True,
+        residual_signal: str = "difference",
     ) -> None:
         super().__init__()
         if channels <= 0:
@@ -60,6 +61,9 @@ class FourierSpectralBottleneck(nn.Module):
         self.use_amplitude = bool(use_amplitude)
         self.use_phase = bool(use_phase)
         self.use_channel_mixing = bool(use_channel_mixing)
+        if residual_signal not in {"difference", "reconstructed"}:
+            raise ValueError("residual_signal must be difference or reconstructed")
+        self.residual_signal = residual_signal
         self.residual = bool(residual)
         self.zero_init_output = bool(zero_init_output)
 
@@ -167,7 +171,7 @@ class FourierSpectralBottleneck(nn.Module):
 
         if self.residual:
             signal = torch.fft.irfft2(
-                transformed - spectrum,
+                transformed - spectrum if self.residual_signal == "difference" else transformed,
                 s=spatial_size,
                 dim=(-2, -1),
                 norm="ortho",
@@ -252,6 +256,7 @@ class _PlainFourierUNetBase(nn.Module):
         fourier_use_channel_mixing: bool = True,
         fourier_residual: bool = True,
         fourier_zero_init_output: bool = True,
+        fourier_residual_signal: str = "difference",
         norm: str = "bn",
         act: str = "relu",
         decoder_use_cbam: bool = False,
@@ -290,6 +295,7 @@ class _PlainFourierUNetBase(nn.Module):
             use_channel_mixing=fourier_use_channel_mixing,
             residual=fourier_residual,
             zero_init_output=fourier_zero_init_output,
+            residual_signal=fourier_residual_signal,
         )
         self.decoder = UNetDecoder(channels=channels, norm=norm, act=act, use_cbam=decoder_use_cbam)
         self.seg_head = nn.Conv2d(channels[0], num_classes, kernel_size=1)

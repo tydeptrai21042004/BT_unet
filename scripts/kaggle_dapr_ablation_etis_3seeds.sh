@@ -33,7 +33,6 @@ python scripts/run_dapr_ablation.py \
   --config-dir configs/dapr_ablation \
   --output-root "${OUTPUT_ROOT}" \
   --allow-insecure-download \
-  --delete-checkpoints-after-eval \
   --no-run-tests
 
 TABLE_DIR="${OUTPUT_ROOT}/results/tables"

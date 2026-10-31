@@ -1,0 +1,4 @@
+# Install repository requirements.txt first.
+# Used only by reviewer-focused boundary/statistical tests and figures.
+scipy>=1.10.0
+matplotlib>=3.7.0

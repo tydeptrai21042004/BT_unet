@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import platform
+import subprocess
 import json
 import math
 import sys
@@ -12,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -48,6 +51,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--train-datasets", type=str, default=None,
+                        help="Comma-separated source datasets; loads only their train manifests.")
+    parser.add_argument("--train-split-file", type=str, default=None,
+                        help="Optional training-only subset manifest, for low-data experiments.")
+    parser.add_argument("--val-dataset", type=str, default=None,
+                        help="Validation dataset (must not be an external target test set).")
     return parser.parse_args()
 
 
@@ -98,6 +107,8 @@ def load_config_from_args(args: argparse.Namespace) -> Dict[str, Any]:
         overrides.setdefault("data", {})["num_workers"] = args.num_workers
     if args.epochs is not None:
         overrides.setdefault("train", {})["epochs"] = args.epochs
+        # A CLI horizon override must not retain the 30-epoch cosine horizon.
+        overrides["train"]["t_max"] = args.epochs
     if args.lr is not None:
         overrides.setdefault("train", {})["lr"] = args.lr
     if args.device is not None:
@@ -106,6 +117,12 @@ def load_config_from_args(args: argparse.Namespace) -> Dict[str, Any]:
         overrides.setdefault("experiment", {})["output_root"] = args.output_root
     if args.seed is not None:
         overrides.setdefault("train", {})["seed"] = args.seed
+    if args.train_datasets is not None:
+        overrides.setdefault("data", {})["train_datasets"] = [normalize_dataset_name(n.strip()) for n in args.train_datasets.split(",") if n.strip()]
+    if args.train_split_file is not None:
+        overrides.setdefault("data", {})["train_split_file"] = args.train_split_file
+    if args.val_dataset is not None:
+        overrides.setdefault("data", {})["val_dataset"] = normalize_dataset_name(args.val_dataset)
     _deep_update(cfg, overrides)
     cfg["model"]["name"] = args.model
     cfg["data"]["dataset"] = normalize_dataset_name(cfg["data"].get("dataset", args.dataset))
@@ -117,18 +134,41 @@ def build_dataloaders(cfg: Dict[str, Any]) -> tuple[DataLoader, DataLoader]:
     image_size = int(data_cfg.get("image_size", 352))
     dataset_name = normalize_dataset_name(data_cfg.get("dataset", "kvasir_seg"))
 
-    train_ds = build_dataset(
-        name=dataset_name,
+    source_names = data_cfg.get("train_datasets") or [dataset_name]
+    if isinstance(source_names, str):
+        source_names = [s.strip() for s in source_names.split(",") if s.strip()]
+    source_names = [normalize_dataset_name(s) for s in source_names]
+    if data_cfg.get("train_datasets"):
+        # KvasirSegDataset otherwise silently loads ALL samples when a split is missing.
+        root = Path(data_cfg.get("root", "data"))
+        for source in source_names:
+            candidates = [root / "splits" / source / "train.txt", root / "splits" / f"{source}_train.txt", root / "splits" / "train.txt"]
+            if not any(path.is_file() for path in candidates):
+                raise FileNotFoundError(f"Missing explicit training split for {source}: {candidates}")
+        source = normalize_dataset_name(data_cfg.get("val_dataset", source_names[0]))
+        candidates = [root / "splits" / source / "val.txt", root / "splits" / f"{source}_val.txt", root / "splits" / "val.txt"]
+        if not any(path.is_file() for path in candidates):
+            raise FileNotFoundError(f"Missing explicit validation split for {source}: {candidates}")
+    if not source_names or len(set(source_names)) != len(source_names):
+        raise ValueError("train_datasets must be a nonempty list of unique names")
+    val_name = normalize_dataset_name(data_cfg.get("val_dataset", source_names[0]))
+    if val_name not in source_names:
+        raise ValueError("Validation must come from a source dataset, not an external test dataset")
+    subset_manifest = data_cfg.get("train_split_file")
+    if subset_manifest and len(source_names) != 1:
+        raise ValueError("train_split_file supports one training source; use explicit combined manifests for multi-source subsets")
+    train_parts = [build_dataset(
+        name=name,
         root=data_cfg.get("root", "data"),
         split="train",
+        split_file=subset_manifest,
         image_size=image_size,
-        transform=build_train_transforms(
-            image_size=image_size,
-            preset=str(data_cfg.get("augmentation", "baseline")),
-        ),
-    )
+        transform=build_train_transforms(image_size=image_size, preset=str(data_cfg.get("augmentation", "baseline"))),
+    ) for name in source_names]
+    # Respect per-dataset train manifests; never train using test splits.
+    train_ds = train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
     val_ds = build_dataset(
-        name=dataset_name,
+        name=val_name,
         root=data_cfg.get("root", "data"),
         split="val",
         image_size=image_size,
@@ -244,6 +284,30 @@ def main() -> None:
     logger.info(f"Training model: {model_name}")
     logger.info(f"Dataset: {cfg['data'].get('dataset')} | Device: {resolved_device}")
     dump_yaml(cfg, exp_paths.root / "resolved_train_config.yaml")
+    # Machine-readable provenance for reviewer reruns; no training behavior changes.
+    data_root = Path(cfg["data"].get("root", "data"))
+    dataset_names = cfg["data"].get("train_datasets") or [cfg["data"].get("dataset", "kvasir_seg")]
+    if isinstance(dataset_names, str):
+        dataset_names = [v.strip() for v in dataset_names.split(",") if v.strip()]
+    datasets_and_splits = [(v, "train") for v in dataset_names]
+    datasets_and_splits.append((cfg["data"].get("val_dataset", dataset_names[0]), "val"))
+    split_records = []
+    for dataset, split in datasets_and_splits:
+        possible = [data_root / "splits" / dataset / f"{split}.txt",
+                    data_root / "splits" / f"{dataset}_{split}.txt",
+                    data_root / "splits" / f"{split}.txt"]
+        selected = next((candidate for candidate in possible if candidate.is_file()), None)
+        split_records.append({"dataset": dataset, "split": split,
+                              "file": str(selected) if selected else None,
+                              "sha256": hashlib.sha256(selected.read_bytes()).hexdigest() if selected else None})
+    revision_tag = subprocess.run(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT,
+                                  capture_output=True, text=True, check=False)
+    save_json({"python": platform.python_version(), "torch": torch.__version__,
+               "cuda_available": torch.cuda.is_available(),
+               "gpu_name": torch.cuda.get_device_name() if torch.cuda.is_available() else None,
+               "git_commit": revision_tag.stdout.strip() if revision_tag.returncode == 0 else None,
+               "model": model_name, "train_seed": cfg["train"].get("seed"),
+               "split_manifests": split_records}, exp_paths.root / "training_provenance.json")
 
     train_loader, val_loader = build_dataloaders(cfg)
     model_cfg = {k: v for k, v in cfg["model"].items() if k != "name"}

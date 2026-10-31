@@ -38,6 +38,42 @@ class DAPRResidualControl(_PlainFourierUNetBase):
         super().__init__(*args, **kwargs)
 
 
+@register_model("dapr_matched_residual")
+class DAPRMatchedResidual(_PlainFourierUNetBase):
+    """Identity residual with reconstructed spectrum and nonzero output initialization.
+
+    Direct BT is unchanged. This is a dedicated reviewer-control architecture.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs["fourier_residual"] = True
+        kwargs["fourier_residual_signal"] = "reconstructed"
+        kwargs["fourier_zero_init_output"] = False
+        super().__init__(*args, **kwargs)
+
+
+@register_model("dapr_matched_residual_zero_init")
+class DAPRMatchedResidualZeroInit(_PlainFourierUNetBase):
+    """Identical reconstructed-spectrum residual, with zero projection init."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs["fourier_residual"] = True
+        kwargs["fourier_residual_signal"] = "reconstructed"
+        kwargs["fourier_zero_init_output"] = True
+        super().__init__(*args, **kwargs)
+
+
+@register_model("dapr_matched_difference")
+class DAPRMatchedDifference(_PlainFourierUNetBase):
+    """Original transformed-minus-input spectral signal, nonzero projection init."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs["fourier_residual"] = True
+        kwargs["fourier_residual_signal"] = "difference"
+        kwargs["fourier_zero_init_output"] = False
+        super().__init__(*args, **kwargs)
+
+
 @register_model("dapr_no_global_phase")
 class DAPRNoGlobalPhase(DAPRUNet):
     """DAPR ablation with amplitude modulation only."""
@@ -62,6 +98,39 @@ class DAPRNoGlobalChannelMix(DAPRUNet):
 
     def __init__(self, *args, **kwargs) -> None:
         kwargs["fourier_use_channel_mixing"] = False
+        super().__init__(*args, **kwargs)
+
+
+@register_model("dapr_amplitude_only")
+class DAPRAmplitudeOnly(DAPRUNet):
+    """Amplitude-only spectral component without phase or spectral channel mixing."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs["fourier_use_amplitude"] = True
+        kwargs["fourier_use_phase"] = False
+        kwargs["fourier_use_channel_mixing"] = False
+        super().__init__(*args, **kwargs)
+
+
+@register_model("dapr_phase_only")
+class DAPRPhaseOnly(DAPRUNet):
+    """Phase-only spectral component without amplitude or spectral channel mixing."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs["fourier_use_amplitude"] = False
+        kwargs["fourier_use_phase"] = True
+        kwargs["fourier_use_channel_mixing"] = False
+        super().__init__(*args, **kwargs)
+
+
+@register_model("dapr_mixing_only")
+class DAPRMixingOnly(DAPRUNet):
+    """Spectral channel-mixing-only component (identity amplitude/phase)."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs["fourier_use_amplitude"] = False
+        kwargs["fourier_use_phase"] = False
+        kwargs["fourier_use_channel_mixing"] = True
         super().__init__(*args, **kwargs)
 
 
@@ -131,6 +200,8 @@ class DAPRDropout00(DAPRUNet):
 __all__ = [
     "DAPRUNet",
     "DAPRResidualControl",
+    "DAPRMatchedResidual", "DAPRMatchedResidualZeroInit", "DAPRMatchedDifference",
+    "DAPRAmplitudeOnly", "DAPRPhaseOnly", "DAPRMixingOnly",
     "DAPRNoGlobalPhase",
     "DAPRNoGlobalAmplitude",
     "DAPRNoGlobalChannelMix",

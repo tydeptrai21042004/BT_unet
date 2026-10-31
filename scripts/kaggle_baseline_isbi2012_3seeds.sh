@@ -130,8 +130,7 @@ python scripts/run_baseline_proposal_comparison.py \
     --seeds "${SEEDS}" \
     --config-dir configs/fair \
     --output-root "${OUTPUT_ROOT}" \
-    --delete-checkpoints-after-eval \
-    --no-run-tests \
+      --no-run-tests \
     --no-run-runtime-baseline-audit \
     "${DATA_ARGS[@]}" \
     "${DOWNLOAD_ARGS[@]}"

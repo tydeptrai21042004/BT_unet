@@ -34,7 +34,6 @@ python scripts/run_baseline_proposal_comparison.py \
   --config-dir configs/fair \
   --output-root "${OUTPUT_ROOT}" \
   --allow-insecure-download \
-  --delete-checkpoints-after-eval \
   --no-run-tests \
   --no-run-runtime-baseline-audit
 

@@ -134,8 +134,7 @@ python "${RUNNER}" \
     --models "${MODELS}" \
     --config-dir "${CONFIG_DIR}" \
     --output-root "${OUTPUT_ROOT}" \
-    --delete-checkpoints-after-eval \
-    --no-run-tests \
+      --no-run-tests \
     "${DATA_ARGS[@]}" \
     "${DOWNLOAD_ARGS[@]}"
 

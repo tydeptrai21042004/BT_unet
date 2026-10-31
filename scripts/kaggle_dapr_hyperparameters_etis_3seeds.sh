@@ -35,7 +35,6 @@ python scripts/run_dapr_hyperparameters.py \
   --config-dir configs/dapr_hyperparameters \
   --output-root "${OUTPUT_ROOT}" \
   --allow-insecure-download \
-  --delete-checkpoints-after-eval \
   --no-run-tests
 
 TABLE_DIR="${OUTPUT_ROOT}/results/tables"

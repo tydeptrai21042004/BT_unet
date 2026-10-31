@@ -29,7 +29,12 @@ DAPR_HYPERPARAMETERS = {
     "dapr_amp_scale_0_5", "dapr_amp_scale_1_5",
     "dapr_phase_pi_half", "dapr_phase_2pi", "dapr_dropout_0_0",
 }
-REGISTRY_MODELS = BASELINES | DAPR_ABLATION | DAPR_HYPERPARAMETERS
+REVIEWER_CONTROLS = {
+    "dapr_matched_residual", "dapr_matched_residual_zero_init", "dapr_matched_difference",
+    "external_spectral",
+    "dapr_amplitude_only", "dapr_phase_only", "dapr_mixing_only",
+}
+REGISTRY_MODELS = BASELINES | DAPR_ABLATION | DAPR_HYPERPARAMETERS | REVIEWER_CONTROLS
 FORBIDDEN_OLD_PROPOSALS = {
     "plain_fourier_unet", "apdr_fourier_unet", "dapr_baf_unet",
     "dapr_direct_unet", "apdr_uniform_route", "plain_fourier_no_residual",
@@ -47,12 +52,17 @@ def test_registry_contains_only_requested_models() -> None:
 
 def test_config_directories_have_exact_scope() -> None:
     assert {p.name for p in CONFIGS.iterdir() if p.is_dir()} == {
-        "official_faithful", "fair", "dapr_ablation", "dapr_hyperparameters"
+        "official_faithful", "fair", "dapr_ablation", "dapr_hyperparameters", "revision"
     }
     assert {p.stem for p in (CONFIGS / "official_faithful").glob("*.yaml")} == BASELINES
     assert {p.stem for p in (CONFIGS / "fair").glob("*.yaml")} == BASELINES | PROPOSALS
     assert {p.stem for p in (CONFIGS / "dapr_ablation").glob("*.yaml")} == DAPR_ABLATION
     assert {p.stem for p in (CONFIGS / "dapr_hyperparameters").glob("*.yaml")} == DAPR_HYPERPARAMETERS
+    assert {p.stem for p in (CONFIGS / "revision").glob("*.yaml")} == {
+        "dapr_unet", "dapr_residual_control", "dapr_matched_residual",
+        "dapr_matched_residual_zero_init", "dapr_matched_difference",
+        "dapr_amplitude_only", "dapr_phase_only", "dapr_mixing_only",
+    }
 
 
 def test_all_fair_configs_share_the_same_training_and_evaluation_protocol() -> None:
