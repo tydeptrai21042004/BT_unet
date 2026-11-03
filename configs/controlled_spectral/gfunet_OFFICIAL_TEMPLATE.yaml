@@ -1,0 +1,38 @@
+# NOT RUNNABLE until exact original source and verified audit are provided.
+# DO NOT use this as a published baseline result without validating GFUNet's
+# actual nnU-Net entrypoint, loss, data transforms and original components.
+experiment:
+  name: official_gfunet_audited
+model:
+  name: verified_external_spectral
+  source_dir: third_party/GFUNet
+  expected_commit: REPLACE_WITH_REAL_SHA
+  audit_file: configs/controlled_spectral/gfunet_verified_audit.json
+  module_path: REPLACE_WITH_ACTUAL_ORIGINAL_MODULE
+  entrypoint: REPLACE_WITH_ACTUAL_FACTORY_OR_CLASS
+  model_kwargs: {}
+  output_key: null
+  output_index: null
+  output_type: logits
+  output_channels: 1
+  allow_resize: false
+data:
+  root: data
+  dataset: kvasir_seg
+  image_size: 352
+  batch_size: 6
+  num_workers: 2
+  augmentation: strong
+train:
+  seed: 42
+  epochs: 30
+  lr: 0.0003
+  optimizer: adamw
+  weight_decay: 0.0001
+  scheduler: cosine
+  t_max: 30
+  loss: bce_dice
+  mixed_precision: false
+  deterministic: true
+  use_aux_outputs_loss: false
+  use_boundary_loss: false

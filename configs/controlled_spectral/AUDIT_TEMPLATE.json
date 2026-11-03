@@ -1,0 +1,11 @@
+{
+  "status": "unverified",
+  "official_repository": "REPLACE_WITH_PAPER_AUTHOR_REPOSITORY",
+  "paper_reference": "REPLACE_WITH_DOI_OR_PAPER_REFERENCE",
+  "commit": "REPLACE_WITH_FULL_UPSTREAM_GIT_SHA",
+  "component_checks": {},
+  "official_training_protocol": "REQUIRED: optimizer, LR, scheduler, pretrained assets, auxiliary losses, preprocessing",
+  "controlled_protocol_deviations": [],
+  "output_contract_check": "REQUIRED: tensor/logits convention and output head selection",
+  "official_validation_evidence": "REQUIRED: reproduced or explained inability to reproduce published numbers"
+}

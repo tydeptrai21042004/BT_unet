@@ -11,6 +11,7 @@ from .baselines.polyp_pvt import PolypPVT, PolypPVTLite
 from .baselines.pranet import PraNet, PraNetLite
 from .baselines.resunetpp import ResUNetPlusPlus, ResUNetPPAttentionGate, ResUNetPPDecoderBlock
 from .baselines.external_spectral import ExternalSpectralBaseline
+from .official.strict_external import VerifiedExternalSpectral
 from .baselines.unet import UNet
 from .baselines.unetpp import UNetPlusPlus
 
@@ -21,6 +22,7 @@ from .proposal.dapr_unet import (
     DAPRResidualControl,
     DAPRMatchedResidual, DAPRMatchedResidualZeroInit, DAPRMatchedDifference,
     DAPRAmplitudeOnly, DAPRPhaseOnly, DAPRMixingOnly,
+    DAPRIdentitySpectralControl, DAPRSpatialChannelMixControl,
     DAPRNoGlobalPhase,
     DAPRNoGlobalAmplitude,
     DAPRNoGlobalChannelMix,
@@ -34,7 +36,7 @@ from .proposal.dapr_unet import (
 )
 
 __all__ = [
-    "build_model", "ExternalSpectralBaseline",
+    "build_model", "ExternalSpectralBaseline", "VerifiedExternalSpectral",
     "UNet", "AttentionUNet", "AttentionUNetDecoderBlock", "UNetPlusPlus",
     "ResUNetPlusPlus", "ResUNetPPAttentionGate", "ResUNetPPDecoderBlock",
     "PraNet", "PraNetLite", "ACSNet", "ACSNetLite",
@@ -43,7 +45,8 @@ __all__ = [
     "FourierSpectralBottleneck", "ResidualFourierUNetControl",
     "DAPRUNet", "DAPRResidualControl",
     "DAPRMatchedResidual", "DAPRMatchedResidualZeroInit", "DAPRMatchedDifference",
-    "DAPRAmplitudeOnly", "DAPRPhaseOnly", "DAPRMixingOnly", "DAPRNoGlobalPhase",
+    "DAPRAmplitudeOnly", "DAPRPhaseOnly", "DAPRMixingOnly",
+    "DAPRIdentitySpectralControl", "DAPRSpatialChannelMixControl", "DAPRNoGlobalPhase",
     "DAPRNoGlobalAmplitude", "DAPRNoGlobalChannelMix",
     "DAPRExpansion10", "DAPRExpansion20", "DAPRAmpScale05", "DAPRAmpScale15",
     "DAPRPhaseHalfPi", "DAPRPhaseTwoPi", "DAPRDropout00",

@@ -37,6 +37,7 @@ class FourierSpectralBottleneck(nn.Module):
         residual: bool = True,
         zero_init_output: bool = True,
         residual_signal: str = "difference",
+        channel_mix_location: str = "frequency",
     ) -> None:
         super().__init__()
         if channels <= 0:
@@ -47,8 +48,8 @@ class FourierSpectralBottleneck(nn.Module):
             raise ValueError("init_hw must contain two positive integers")
         if amplitude_scale < 0 or phase_max < 0:
             raise ValueError("spectral response limits must be non-negative")
-        if not (use_amplitude or use_phase or use_channel_mixing):
-            raise ValueError("At least one spectral operation must be enabled")
+        # The all-identity configuration is a named factorial ablation control.
+        # The published direct BT U-Net still enables all three operations.
         if not residual and zero_init_output:
             raise ValueError("zero_init_output requires residual=True")
 
@@ -64,6 +65,11 @@ class FourierSpectralBottleneck(nn.Module):
         if residual_signal not in {"difference", "reconstructed"}:
             raise ValueError("residual_signal must be difference or reconstructed")
         self.residual_signal = residual_signal
+        if channel_mix_location not in {"frequency", "spatial"}:
+            raise ValueError("channel_mix_location must be 'frequency' or 'spatial'")
+        if channel_mix_location == "spatial" and residual:
+            raise ValueError("Spatial-mixer control is only defined for direct reconstruction")
+        self.channel_mix_location = channel_mix_location
         self.residual = bool(residual)
         self.zero_init_output = bool(zero_init_output)
 
@@ -167,7 +173,8 @@ class FourierSpectralBottleneck(nn.Module):
         spatial_size = z.shape[-2:]
         spectrum = torch.fft.rfft2(z, dim=(-2, -1), norm="ortho")
         gain, phase = self._response(spectrum)
-        transformed = self._mix(spectrum * torch.polar(gain, phase))
+        modulated = spectrum * torch.polar(gain, phase)
+        transformed = self._mix(modulated) if self.channel_mix_location == "frequency" else modulated
 
         if self.residual:
             signal = torch.fft.irfft2(
@@ -184,6 +191,10 @@ class FourierSpectralBottleneck(nn.Module):
                 dim=(-2, -1),
                 norm="ortho",
             )
+            if self.channel_mix_location == "spatial" and self.use_channel_mixing:
+                # For a frequency-independent real matrix M, this is equivalent
+                # (up to FFT floating point error) to mixing before irfft2.
+                signal = self.spectral_channel_mixer(signal)
             output = self.post(self.dropout(signal))
 
         disagreement: torch.Tensor | None = None
@@ -257,6 +268,7 @@ class _PlainFourierUNetBase(nn.Module):
         fourier_residual: bool = True,
         fourier_zero_init_output: bool = True,
         fourier_residual_signal: str = "difference",
+        fourier_channel_mix_location: str = "frequency",
         norm: str = "bn",
         act: str = "relu",
         decoder_use_cbam: bool = False,
@@ -296,6 +308,7 @@ class _PlainFourierUNetBase(nn.Module):
             residual=fourier_residual,
             zero_init_output=fourier_zero_init_output,
             residual_signal=fourier_residual_signal,
+            channel_mix_location=fourier_channel_mix_location,
         )
         self.decoder = UNetDecoder(channels=channels, norm=norm, act=act, use_cbam=decoder_use_cbam)
         self.seg_head = nn.Conv2d(channels[0], num_classes, kernel_size=1)

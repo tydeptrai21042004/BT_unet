@@ -134,6 +134,26 @@ class DAPRMixingOnly(DAPRUNet):
         super().__init__(*args, **kwargs)
 
 
+@register_model("dapr_identity_spectral_control")
+class DAPRIdentitySpectralControl(DAPRUNet):
+    """Projection/FFT/IFFT control with identity amplitude, phase and mixing."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs["fourier_use_amplitude"] = False
+        kwargs["fourier_use_phase"] = False
+        kwargs["fourier_use_channel_mixing"] = False
+        super().__init__(*args, **kwargs)
+
+
+@register_model("dapr_spatial_channel_mix_control")
+class DAPRSpatialChannelMixControl(DAPRUNet):
+    """Mathematically equivalent post-irfft 1x1 channel mixer control."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs["fourier_channel_mix_location"] = "spatial"
+        super().__init__(*args, **kwargs)
+
+
 @register_model("dapr_expansion_1_0")
 class DAPRExpansion10(DAPRUNet):
     """DAPR sensitivity variant with expansion ratio 1.0."""
@@ -202,6 +222,7 @@ __all__ = [
     "DAPRResidualControl",
     "DAPRMatchedResidual", "DAPRMatchedResidualZeroInit", "DAPRMatchedDifference",
     "DAPRAmplitudeOnly", "DAPRPhaseOnly", "DAPRMixingOnly",
+    "DAPRIdentitySpectralControl", "DAPRSpatialChannelMixControl",
     "DAPRNoGlobalPhase",
     "DAPRNoGlobalAmplitude",
     "DAPRNoGlobalChannelMix",

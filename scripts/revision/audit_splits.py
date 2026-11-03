@@ -6,13 +6,18 @@ import argparse
 import hashlib
 from pathlib import Path
 
-from common import sha256_file, write_json
+try:
+    from .common import sha256_file, write_json
+except ImportError:
+    from common import sha256_file, write_json
 from src.datasets import build_dataset, normalize_dataset_name
 
 
-def manifest_path(root, dataset, split):
+def manifest_path(root, dataset, split, strict_dataset_paths=False):
     root=Path(root)
-    candidates=[root/'splits'/dataset/f'{split}.txt',root/'splits'/f'{dataset}_{split}.txt',root/'splits'/f'{split}.txt']
+    candidates=[root/'splits'/dataset/f'{split}.txt',root/'splits'/f'{dataset}_{split}.txt']
+    if not strict_dataset_paths:
+        candidates.append(root/'splits'/f'{split}.txt')
     for item in candidates:
         if item.exists():return item
     raise FileNotFoundError(f'Missing {dataset}/{split} manifest: searched {candidates}. Explicit manifests required in revision protocol.')

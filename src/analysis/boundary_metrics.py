@@ -47,4 +47,8 @@ def measure_binary(prob, target, threshold=0.5, boundary_tolerance=2):
                 precision=float(tp / (tp + fp + 1e-7)),
                 recall=float(tp / (tp + fn + 1e-7)),
                 mae=mae, boundary_f1=float(bf1), hd95_pixels=hd95,
-                assd_pixels=assd, lesion_fraction=float(gt.mean()))
+                assd_pixels=assd, lesion_fraction=float(gt.mean()),
+                empty_prediction=int(not pred.any()),
+                empty_ground_truth=int(not gt.any()),
+                complete_miss=int(bool(gt.any()) and not bool((gt & pred).any())),
+                distance_defined=int(np.isfinite(hd95) and np.isfinite(assd)))

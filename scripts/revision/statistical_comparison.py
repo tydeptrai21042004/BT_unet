@@ -26,30 +26,62 @@ def read_rows(path):
 
 
 def compare(a, b, metric='dice', cluster_field=None, resamples=2000, seed=123):
-    a,b=read_rows(a),read_rows(b)
-    if set(a)!=set(b):
-        missing_a=list(set(b)-set(a))[:5];missing_b=list(set(a)-set(b))[:5]
-        raise ValueError(f'Unmatched samples: missing from first={missing_a}, from second={missing_b}')
-    keys=sorted(a)
-    diff=np.array([float(a[k][metric])-float(b[k][metric]) for k in keys])
-    if not np.isfinite(diff).all():raise ValueError('Nonfinite metric difference')
-    # Group repeated observations from same patient/video if requested.
-    groups = [a[k].get(cluster_field, '') if cluster_field else f'{k[0]}:{k[1]}' for k in keys]
-    if cluster_field and any(not value for value in groups):
-        raise ValueError(f'Missing cluster ID {cluster_field} in per-image CSV')
-    unique=sorted(set(groups));by_group={g:diff[np.array(groups)==g] for g in unique}
-    rng=np.random.default_rng(seed)
+    """Paired differences with seed-level tests and optional cluster uncertainty.
+
+    Repeated images from the same training seed are NOT independent training
+    replicates. For inference over independent training runs, aggregate per seed
+    and test those differences. A 3-pair exact Wilcoxon test cannot get p<.05.
+    """
+    a, b = read_rows(a), read_rows(b)
+    if set(a) != set(b):
+        missing_a = list(set(b)-set(a))[:5]
+        missing_b = list(set(a)-set(b))[:5]
+        raise ValueError(f'Unmatched pairs: candidate missing={missing_a}; reference missing={missing_b}')
+    if resamples < 100:
+        raise ValueError('Use at least 100 bootstrap draws')
+    keys = sorted(a)
+    diff = np.array([float(a[k][metric])-float(b[k][metric]) for k in keys])
+    if not np.isfinite(diff).all():
+        raise ValueError('Nonfinite paired differences')
+    seed_values = sorted(set(k[1] for k in keys))
+    by_seed = np.array([diff[np.array([key[1] == s for key in keys])].mean() for s in seed_values])
+    n_seeds = len(seed_values)
+    rng = np.random.default_rng(seed)
+    if n_seeds >= 2:
+        boot_seed = rng.choice(by_seed, size=(resamples,n_seeds), replace=True).mean(axis=1)
+        seed_ci = [float(np.quantile(boot_seed, q)) for q in (.025,.975)]
+    else:
+        seed_ci = [float('nan')]*2
+    run_t_p = float(stats.ttest_1samp(by_seed,0.0).pvalue) if n_seeds >= 2 and float(by_seed.std()) > 1e-12 else float('nan')
+    try:
+        run_wilcoxon_p = float(stats.wilcoxon(by_seed,zero_method='wilcox',alternative='two-sided',method='exact').pvalue) if n_seeds >= 2 and np.any(by_seed != 0) else float('nan')
+    except (ValueError,TypeError):
+        run_wilcoxon_p = float('nan')
+    # Cluster bootstrap is conditional on selected patients/videos, independent
+    # of run-level CI. Without a known cluster ID it is image-level exploratory.
+    groups = [a[k].get(cluster_field, '') if cluster_field else k[0] for k in keys]
+    if cluster_field and any(not g for g in groups):
+        raise ValueError(f'Missing cluster ID: {cluster_field}')
+    if cluster_field and any(a[k].get(cluster_field)!=b[k].get(cluster_field) for k in keys):
+        raise ValueError('Candidate and reference patient/video cluster IDs disagree')
+    unique = sorted(set(groups))
+    values = np.array(groups)
+    by_group = {g: diff[values == g] for g in unique}
     boot=[]
     for _ in range(resamples):
         drawn=rng.choice(unique,size=len(unique),replace=True)
         boot.append(float(np.concatenate([by_group[g] for g in drawn]).mean()))
-    pvalue=float(stats.ttest_1samp(diff,0).pvalue) if len(diff)>=3 else float('nan')
-    return {'n_pairs':len(diff),'n_clusters':len(unique),'mean_difference':float(diff.mean()),
-            'median_difference':float(np.median(diff)),
+    return {'n_pairs':len(diff),'n_clusters':len(unique),'n_training_seeds':n_seeds,
+            'mean_difference':float(diff.mean()),'median_difference':float(np.median(diff)),
             'bootstrap_ci_low':float(np.quantile(boot,.025)),
             'bootstrap_ci_high':float(np.quantile(boot,.975)),
-            'paired_t_p_exploratory':pvalue,
-            'note':'Exploratory paired t test assumes independent paired differences; bootstrap resamples selected clusters.'}
+            'training_seed_ci_low':seed_ci[0], 'training_seed_ci_high':seed_ci[1],
+            'paired_t_p_exploratory':run_t_p,
+            'paired_wilcoxon_p_training_seeds':run_wilcoxon_p,
+            'note':('Paired tests use independent seed-mean differences, NOT per-image pseudoreplicates. '
+                    'Bootstrap confidence limits resample provided patient/video clusters '
+                    'when cluster_field is supplied; otherwise image IDs. '
+                    'With only 3 seeds exact two-sided Wilcoxon cannot reach p<0.05.')}
 
 
 def holm(p_values):
