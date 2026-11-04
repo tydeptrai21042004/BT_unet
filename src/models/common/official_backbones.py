@@ -126,8 +126,8 @@ class OfficialResNet34Encoder(nn.Module):
             checkpoint_url = DEFAULT_CHECKPOINT_URLS["resnet34"]
         if checkpoint or checkpoint_url:
             loaded = _load_state_dict(self.backbone, checkpoint=checkpoint, url=checkpoint_url, strict=False)
-            if pretrained and not loaded:
-                warnings.warn("Requested ResNet-34 pretrained=True, but checkpoint loading failed; continuing from random initialization.")
+            if not loaded:
+                raise RuntimeError("Required requested ResNet-34 checkpoint failed to load; refusing random-weight substitution.")
         self.raw_channels = (64, 64, 128, 256, 512)
         self.channels = channels
         self.projections = nn.ModuleList(_Projection(ic, oc) for ic, oc in zip(self.raw_channels, channels))
@@ -177,10 +177,12 @@ class OfficialRes2NetEncoder(nn.Module):
         self.backbone = ctor(pretrained=False)
         if pretrained and not checkpoint and not checkpoint_url:
             checkpoint_url = DEFAULT_CHECKPOINT_URLS.get(variant)
+            if not checkpoint_url:
+                raise RuntimeError(f"No official pretrained checkpoint URL is registered for {variant}; provide a verified checkpoint explicitly.")
         if checkpoint or checkpoint_url:
             loaded = _load_state_dict(self.backbone, checkpoint=checkpoint, url=checkpoint_url, strict=False)
-            if pretrained and not loaded:
-                warnings.warn("Requested Res2Net pretrained=True, but checkpoint loading failed; continuing from random initialization.")
+            if not loaded:
+                raise RuntimeError("Required requested Res2Net checkpoint failed to load; refusing random-weight substitution.")
         self.channels = channels
         self.raw_channels = raw_channels
         self.projections = nn.ModuleList(_Projection(ic, oc) for ic, oc in zip(raw_channels, channels))
@@ -236,10 +238,12 @@ class OfficialPVTv2Backbone(nn.Module):
         self.backbone = ctor(img_size=image_size, in_chans=in_channels)
         if pretrained and not checkpoint and not checkpoint_url:
             checkpoint_url = DEFAULT_CHECKPOINT_URLS.get(variant)
+            if not checkpoint_url:
+                raise RuntimeError(f"No official pretrained checkpoint URL is registered for {variant}; provide a verified checkpoint explicitly.")
         if checkpoint or checkpoint_url:
             loaded = _load_state_dict(self.backbone, checkpoint=checkpoint, url=checkpoint_url, strict=False)
-            if pretrained and not loaded:
-                warnings.warn("Requested PVTv2 pretrained=True, but checkpoint loading failed; continuing from random initialization.")
+            if not loaded:
+                raise RuntimeError("Required requested PVTv2 checkpoint failed to load; refusing random-weight substitution.")
         self.channels = tuple(int(c) for c in embed_dims)
         self.raw_channels = raw_channels
         self.projections = nn.ModuleList(_Projection(ic, oc) for ic, oc in zip(raw_channels, self.channels))
@@ -270,10 +274,12 @@ class OfficialHarDNetEncoder(nn.Module):
         self.backbone = HarDNet(arch=arch, pretrained=False)
         if pretrained and not checkpoint and not checkpoint_url:
             checkpoint_url = DEFAULT_CHECKPOINT_URLS.get(f"hardnet{arch}")
+            if not checkpoint_url:
+                raise RuntimeError(f"No official pretrained checkpoint URL is registered for HarDNet-{arch}; provide a verified checkpoint explicitly.")
         if checkpoint or checkpoint_url:
             loaded = _load_state_dict(self.backbone, checkpoint=checkpoint, url=checkpoint_url, strict=False)
-            if pretrained and not loaded:
-                warnings.warn("Requested HarDNet pretrained=True, but checkpoint loading failed; continuing from random initialization.")
+            if not loaded:
+                raise RuntimeError("Required requested HarDNet checkpoint failed to load; refusing random-weight substitution.")
         self.raw_channels = (32, 128, 256, 640, 1024)
         self.channels = tuple(int(c) for c in channels)
         self.projections = nn.ModuleList(_Projection(ic, oc) for ic, oc in zip(self.raw_channels, self.channels))
