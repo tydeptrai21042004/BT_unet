@@ -13,7 +13,10 @@ from pathlib import Path
 import numpy as np
 from scipy import stats
 
-from common import write_csv, write_json
+try:
+    from .common import write_csv, write_json
+except ImportError:
+    from common import write_csv, write_json
 
 
 def read_rows(path):
@@ -111,5 +114,7 @@ if __name__=='__main__':
         rows.append({'candidate':name,'reference':args.reference,'metric':args.metric,**result})
     for row,adjusted in zip(rows,holm([r['paired_t_p_exploratory'] for r in rows])):
         row['holm_adjusted_p_exploratory']=adjusted
+    for row,adjusted in zip(rows,holm([r['paired_wilcoxon_p_training_seeds'] for r in rows])):
+        row['holm_adjusted_p_wilcoxon_training_seeds']=adjusted
     write_csv(rows,args.output)
     print('Saved',args.output)

@@ -101,3 +101,16 @@ bash scripts/kaggle_baseline_proposal_etis_3seeds.sh
 bash scripts/kaggle_dapr_ablation_etis_3seeds.sh
 bash scripts/kaggle_dapr_hyperparameters_etis_3seeds.sh
 ```
+
+
+## BSPC reviewer revision (2026-11-17)
+
+A reviewer-focused code extension is documented in
+[`docs/REVIEWER_CODE_MAPPING.md`](docs/REVIEWER_CODE_MAPPING.md) and
+[`docs/REVIEWER_RUNBOOK_20261117.md`](docs/REVIEWER_RUNBOOK_20261117.md).
+It preserves the original 2D direct-reconstruction BT U-Net, adds reproducibility
+checks and reviewer experiments, and introduces a **separate** 3D research variant.
+The project does **not** bundle original third-party GFUNet/AFDSeg model sources,
+medical datasets, trained weights, or new measured benchmark results. Official
+spectral models require independently pinned source, an explicit paper-to-code
+audit, and genuine retraining before making empirical comparisons.

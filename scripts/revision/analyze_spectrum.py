@@ -61,16 +61,31 @@ def analyze_model(model, output):
         im = ax.imshow(np.fft.fftshift(arr, axes=0), aspect='auto', interpolation='nearest')
         ax.set(xlabel='Nonnegative horizontal rFFT frequency bin', ylabel='Centered vertical frequency bin', title=name.replace('_',' '))
         fig.colorbar(im, ax=ax)
-        fig.tight_layout();fig.savefig(output / f'{name}.png', dpi=180);plt.close(fig)
+        fig.tight_layout();fig.savefig(output / f'{name}.png', dpi=350);fig.savefig(output / f'{name}.pdf');plt.close(fig)
     rows = []
     for label, data in [('amplitude', amplitude_mean), ('operator_frobenius', fro)]:
         for index, row in enumerate(radial_profile(data)):
             rows.append({'quantity': label, 'bin': index, **row})
     write_csv(rows, output / 'radial_profiles.csv')
+    # This is a coarse descriptor of the *learned gain*, not a diagnosis of
+    # physiological signal suppression. Phase and input activations also matter.
+    h,w=shape
+    fy=np.fft.fftfreq(h)[:,None]
+    fx=np.fft.rfftfreq(2*(w-1))[None,:] if w>1 else np.zeros((1,1))
+    radius=np.sqrt(fy**2+fx**2)
+    bands={'low':(0.,.18),'middle':(.18,.35),'high':(.35,.71)}
+    gain_bands=[]
+    for band,(lo,hi) in bands.items():
+        sel=(radius>=lo)&(radius<hi if band!='high' else radius<=hi)
+        gain_bands.append({'band':band,'freq_min':lo,'freq_max':hi,
+                           'mean_amplitude_gain':float(amplitude_mean[sel].mean()) if sel.any() else float('nan'),
+                           'mean_spectral_core_frobenius':float(fro[sel].mean()) if sel.any() else float('nan'),
+                           'n_bins':int(sel.sum())})
+    write_csv(gain_bands,output/'amplitude_gain_bands.csv')
     write_json({'hidden_channels': bt.hidden_channels, 'grid': shape,
                 'amplitude_gain_min': float(gain.min()), 'amplitude_gain_mean':float(gain.mean()),
                 'amplitude_gain_max':float(gain.max()), 'phase_abs_mean':float(np.abs(phase).mean()),
-                'note': 'Spectral core Frobenius norm is pre-irfft, not a learned low/high-pass classification.'},
+                'note': 'Responses at the learned base grid. Low/high frequency prioritization requires measured input-conditioned responses and intervention testing; core Frobenius gain is not a clinical denoising claim.'},
                output / 'spectrum_summary.json')
 
 

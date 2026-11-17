@@ -38,6 +38,7 @@ RESIDUAL = [
     ('spatial_mixer', 'dapr_spatial_channel_mix_control', None),
 ]
 CONVERGENCE = ['unet', 'unetpp', 'resunetpp', 'dapr_unet']
+PRIMARY = ['unet', 'dapr_unet']
 
 
 def load_config(path: Path) -> dict:
@@ -52,12 +53,12 @@ def load_config(path: Path) -> dict:
 def models_for_group(group: str, external_configs: list[Path]):
     if group == 'factorial':
         for name in FACTORIAL:
-            yield name, name, None, ROOT / 'configs/revision/dapr_unet.yaml'
+            yield name, name, None, (ROOT / 'configs/revision' / f'{name}.yaml') if (ROOT / 'configs/revision' / f'{name}.yaml').exists() else (ROOT / 'configs/dapr_ablation' / f'{name}.yaml')
     elif group == 'residual':
         for label, model, alpha in RESIDUAL:
-            yield label, model, alpha, ROOT / 'configs/revision/dapr_unet.yaml' if model.startswith('dapr_spatial') or model == 'dapr_unet' else ROOT / 'configs/revision/dapr_matched_residual.yaml'
-    elif group == 'convergence':
-        for name in CONVERGENCE:
+            yield label, model, alpha, ROOT / 'configs/revision' / f'{model}.yaml'
+    elif group in {'convergence','primary'}:
+        for name in (CONVERGENCE if group == 'convergence' else PRIMARY):
             yield name, name, None, ROOT / 'configs/fair' / f'{name}.yaml'
     elif group == 'official':
         if not external_configs:
@@ -143,25 +144,11 @@ def build_plan(args):
     return jobs
 
 
-def check_splits(data_root, datasets, split):
-    # Fail closed before starting lengthy training; prevent accidental generic
-    # train.txt fallback in the reviewer-controlled protocol.
-    from scripts.revision.audit_splits import manifest_path
-    for dataset in datasets:
-        for name in ('train', 'val', split):
-            manifest_path(data_root, dataset, name, strict_dataset_paths=True)
-        seen = {}
-        for name in ('train','val','test'):
-            path = manifest_path(data_root,dataset,name,strict_dataset_paths=True)
-            ids={line.strip() for line in path.read_text().splitlines() if line.strip() and not line.startswith('#')}
-            if not ids:
-                raise ValueError(f'Empty {name} split for {dataset}')
-            if seen.keys() & ids:
-                raise ValueError(f'Overlapping split IDs for {dataset}')
-            for sid in ids:
-                if sid in seen:
-                    raise ValueError(f'Duplicate sample {sid} in {seen[sid]}/{name}')
-                seen[sid]=name
+def check_splits(data_root, datasets, split, *, cluster_maps=None, compare_content=False):
+    # Use one audited code path, including patient/video and exact-content checks.
+    from scripts.revision.audit_splits import audit
+    return audit(data_root,sorted(datasets),compare_content=compare_content,
+                 require_all=True,cluster_maps=cluster_maps)
 
 
 def write_config(path, cfg):
@@ -173,9 +160,49 @@ def write_config(path, cfg):
     path.write_text(text, encoding='utf-8')
 
 
+def verify_checkpoint_for_job(job):
+    """Reject stale checkpoints even if a run directory happens to exist."""
+    import torch
+    ckpt_path=Path(job['checkpoint'])
+    if not ckpt_path.is_file():
+        raise FileNotFoundError(ckpt_path)
+    payload=torch.load(ckpt_path,map_location='cpu',weights_only=False)
+    cfg=payload.get('config') if isinstance(payload,dict) else None
+    if not isinstance(cfg,dict):
+        raise ValueError(f'Checkpoint lacks resolved configuration: {ckpt_path}')
+    for section,key in [('model','name'),('train','seed'),('train','epochs'),
+                        ('data','dataset'),('data','image_size')]:
+        expected=job['config'][section][key]
+        observed=cfg.get(section,{}).get(key)
+        if observed!=expected:
+            raise ValueError(f'Stale checkpoint {ckpt_path}: {section}.{key}={observed!r} '
+                             f'vs expected {expected!r}')
+    return True
+
+
+def has_matching_evaluation(job):
+    """A completed CSV is reusable ONLY for the exact checkpoint and split."""
+    csv_path=Path(job['metrics_dir'])/'per_image.csv'
+    summary_path=csv_path.parent/'summary.json'
+    if not csv_path.is_file() or not summary_path.is_file():
+        return False
+    try:
+        summary=json.loads(summary_path.read_text(encoding='utf-8'))
+    except (ValueError,OSError):
+        return False
+    cmd=job['eval_command']
+    split=cmd[cmd.index('--split')+1]
+    return (summary.get('checkpoint_sha256')==sha256_file(job['checkpoint'])
+            and summary.get('dataset')==job['dataset']
+            and summary.get('split')==split
+            and summary.get('training_seed')==job['seed'])
+
+
 def execute(jobs, args):
     if args.run:
-        check_splits(args.data_root, {j['dataset'] for j in jobs}, args.split)
+        check_splits(args.data_root, {j['dataset'] for j in jobs}, args.split,
+                     cluster_maps=dict(pair.split('=',1) for pair in args.cluster_map),
+                     compare_content=args.compare_content_hashes)
     for job in jobs:
         ckpt=Path(job['checkpoint'])
         result=Path(job['metrics_dir'])/'per_image.csv'
@@ -187,7 +214,11 @@ def execute(jobs, args):
         write_config(Path(job['config_path']),job['config'])
         run_dir=Path(job['config_path']).parent
         expected={'run_id':job['id'],'model':job['model'],'seed':job['seed'],
-                  'dataset':job['dataset'],'config_sha256':sha256_file(job['config_path'])}
+                  'dataset':job['dataset'],'config_sha256':sha256_file(job['config_path']),
+                  'source_config_sha256':sha256_file(job['source_config']),
+                  'split_sha256':{sp:sha256_file(
+                      __import__('scripts.revision.audit_splits',fromlist=['manifest_path']).manifest_path(
+                          args.data_root,job['dataset'],sp)) for sp in ('train','val','test')}}
         meta_file=run_dir/'experiment_manifest.json'
         if meta_file.is_file() and json.loads(meta_file.read_text(encoding='utf-8')) != expected:
             raise ValueError(f'Existing provenance differs for {job["id"]}')
@@ -196,9 +227,8 @@ def execute(jobs, args):
             subprocess.run(job['train_command'],check=True,cwd=ROOT)
         else:
             print('[SKIP TRAIN; VALID CHECKPOINT EXISTS]',ckpt)
-        if not ckpt.is_file():
-            raise FileNotFoundError(f'Training did not create expected checkpoint: {ckpt}')
-        if not (args.resume and result.is_file() and (result.parent/'summary.json').is_file()):
+        verify_checkpoint_for_job(job)
+        if not (args.resume and has_matching_evaluation(job)):
             subprocess.run(job['eval_command'],check=True,cwd=ROOT)
         else:
             print('[SKIP EVAL; OUTPUT EXISTS]',result)
@@ -208,7 +238,7 @@ def execute(jobs, args):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--groups',default='factorial,residual,convergence',help='factorial,residual,convergence,official')
+    p.add_argument('--groups',default='factorial,residual,convergence',help='primary,factorial,residual,convergence,official')
     p.add_argument('--datasets',default='kvasir_seg')
     p.add_argument('--seeds',default='42,1337,2024')
     p.add_argument('--epochs',type=int,default=100)
@@ -222,6 +252,8 @@ def main():
     p.add_argument('--split',default='test',choices=['train','val','test'])
     p.add_argument('--external-configs',default='',help='Comma-separated completed official baseline YAML files')
     p.add_argument('--save-predictions',action='store_true')
+    p.add_argument('--compare-content-hashes',action='store_true',help='Verify identical source images across splits/datasets')
+    p.add_argument('--cluster-map',action='append',default=[],help='DATASET=path/to/patient_video_clusters.csv')
     p.add_argument('--resume',action='store_true',help='Skip completed checkpoints/evaluations; never skip absent files')
     p.add_argument('--run',action='store_true',help='Execute; without this flag only write/print an experiment plan')
     args=p.parse_args()

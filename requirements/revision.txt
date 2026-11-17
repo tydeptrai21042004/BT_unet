@@ -2,3 +2,5 @@
 # Used only by reviewer-focused boundary/statistical tests and figures.
 scipy>=1.10.0
 matplotlib>=3.7.0
+# Optional volumetric NIfTI loading; .npy/.npz inputs work without it.
+nibabel>=5.1.0

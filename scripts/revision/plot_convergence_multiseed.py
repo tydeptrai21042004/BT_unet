@@ -59,7 +59,7 @@ def plot(rows, output, metric):
     ax.set(xlabel='Epoch',ylabel=metric)
     ax.grid(alpha=.2);ax.legend(fontsize=8)
     fig.tight_layout();out=Path(output);out.parent.mkdir(parents=True,exist_ok=True)
-    fig.savefig(out,dpi=220);plt.close(fig)
+    fig.savefig(out,dpi=350);plt.close(fig)
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)

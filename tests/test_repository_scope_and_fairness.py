@@ -31,7 +31,8 @@ DAPR_HYPERPARAMETERS = {
 }
 REVIEWER_CONTROLS = {
     "dapr_matched_residual", "dapr_matched_residual_zero_init", "dapr_matched_difference",
-    "external_spectral",
+    "external_spectral", "verified_external_spectral",
+    "dapr_identity_spectral_control", "dapr_spatial_channel_mix_control",
     "dapr_amplitude_only", "dapr_phase_only", "dapr_mixing_only",
 }
 REGISTRY_MODELS = BASELINES | DAPR_ABLATION | DAPR_HYPERPARAMETERS | REVIEWER_CONTROLS
@@ -52,7 +53,7 @@ def test_registry_contains_only_requested_models() -> None:
 
 def test_config_directories_have_exact_scope() -> None:
     assert {p.name for p in CONFIGS.iterdir() if p.is_dir()} == {
-        "official_faithful", "fair", "dapr_ablation", "dapr_hyperparameters", "revision"
+        "official_faithful", "fair", "dapr_ablation", "dapr_hyperparameters", "revision", "controlled_spectral"
     }
     assert {p.stem for p in (CONFIGS / "official_faithful").glob("*.yaml")} == BASELINES
     assert {p.stem for p in (CONFIGS / "fair").glob("*.yaml")} == BASELINES | PROPOSALS
@@ -62,6 +63,7 @@ def test_config_directories_have_exact_scope() -> None:
         "dapr_unet", "dapr_residual_control", "dapr_matched_residual",
         "dapr_matched_residual_zero_init", "dapr_matched_difference",
         "dapr_amplitude_only", "dapr_phase_only", "dapr_mixing_only",
+        "dapr_identity_spectral_control", "dapr_spatial_channel_mix_control",
     }
 
 
