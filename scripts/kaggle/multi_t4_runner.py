@@ -12,7 +12,8 @@ import os, sys, time, json, base64, zlib, hashlib, zipfile, subprocess, shutil, 
 from pathlib import Path
 
 parser = argparse.ArgumentParser(description='Run BT_unet experiment queue under a Kaggle 12h T4 budget')
-parser.add_argument('--scope', choices=['ALL','CORE','OPTIONAL'], default='ALL')
+parser.add_argument('--scope', choices=['ALL','CORE','OPTIONAL','AUTO'], default='ALL',
+    help='AUTO runs only jobs whose required datasets have public direct HTTPS ZIP URLs; independent 1-based queue')
 parser.add_argument('--start-index', type=int, default=None,
     help='Experiment number (1-based when --one-based; else legacy 0-based index)')
 parser.add_argument('--one-based', action='store_true',
@@ -137,9 +138,12 @@ def install_code():
     RUN_META['source_code_hashes']={p:hashlib.sha256((REPO/p).read_bytes()).hexdigest()
         for p in tracked if (REPO/p).is_file() }
     RUN_META['fidelity_patch_sha256']='already_in_git_no_runtime_patch'
-    run_cmd([sys.executable,'scripts/revision/audit_baseline_fidelity.py',
-       '--output',str(RESULTS/'baseline_fidelity_audit.json'),'--strict-structure'],
-       cwd=REPO,name='local_baseline_fidelity_audit',max_seconds=90)
+    if SCOPE != 'AUTO':
+        run_cmd([sys.executable,'scripts/revision/audit_baseline_fidelity.py',
+           '--output',str(RESULTS/'baseline_fidelity_audit.json'),'--strict-structure'],
+           cwd=REPO,name='local_baseline_fidelity_audit',max_seconds=90)
+    else:
+        print('[AUTO] Skipping baseline source audit to prioritize training.',flush=True)
     if not os.environ.get('BT_KAGGLE_SKIP_PIP'):
         run_cmd([sys.executable,'-m','pip','install','-q','-r','requirements.txt','-r','requirements/revision.txt'],
             cwd=REPO,max_seconds=1400,name='pip_install')
@@ -227,47 +231,93 @@ def _find_valid_kvasir_input(base):
 
 
 def _resolve_kvasir_kaggle():
-    """Use Kaggle's dataset delivery instead of disabling Simula TLS checks."""
-    mounted=Path('/kaggle/input')
+    """Resolve Kvasir-SEG without Kaggle's disallowed non-interactive attach API.
+
+    Source order: a previously attached Kaggle Input; Simula's public HTTPS ZIP;
+    an authenticated Kaggle CLI download (optional). Explicit data source/ZIP
+    overrides are handled by setup_datasets() before this helper is called.
+    Every source must contain exactly 1,000 matched image/mask pairs.
+    """
+    from src.datasets.registry import get_dataset_spec
+
+    mounted = Path(os.environ.get('BT_KAGGLE_INPUT_ROOT', '/kaggle/input'))
     if mounted.is_dir():
-        for folder in sorted(mounted.iterdir()):
-            if 'kvasir' in folder.name.lower():
-                result=_find_valid_kvasir_input(folder)
-                if result:
-                    print('[DATA] Using existing Kaggle input:',result[1],flush=True)
-                    return result, 'kaggle_input_mount'
+        # A mounted input might have a different user-chosen slug, but scanning
+        # only for 'kvasir' is cheap and prevents choosing an unrelated dataset.
+        candidates = [p for p in sorted(mounted.iterdir())
+                      if 'kvasir' in p.name.lower()]
+        for folder in candidates:
+            result = _find_valid_kvasir_input(folder)
+            if result:
+                print('[DATA] Verified Kvasir-SEG from attached Kaggle Input:',
+                      result[1], flush=True)
+                return result, 'kaggle_input_mount'
+
+    failures = []
+    download_dir = SESSION_DATA / 'downloads' / 'kvasir_seg'
+    download_dir.mkdir(parents=True, exist_ok=True)
+    url = get_dataset_spec('kvasir_seg').default_download_url
+    if not url or not url.startswith('https://'):
+        raise RuntimeError('Kvasir-SEG registry has no trusted HTTPS download URL.')
+
+    archive = download_dir / 'kvasir-seg.zip'
+    print('[DATA] Kaggle non-interactive mode: downloading from the public '
+          'Simula archive instead of using kagglehub.dataset_download().', flush=True)
+    print('[DATA] Official source:', url, flush=True)
     try:
-        import kagglehub
-    except ImportError:
-        run_cmd([sys.executable,'-m','pip','install','-q','kagglehub'],
-                name='install_kagglehub',max_seconds=240)
-        import kagglehub
-    handle='debeshjha1/kvasirseg'
-    print('[DATA] Retrieving Kvasir-SEG from Kaggle:',handle,flush=True)
-    try:
-        # Bound network I/O to protect the 12-hour session deadline.
-        marker=RESULTS/'kagglehub_dataset_path.txt'
-        snippet=("from pathlib import Path; import kagglehub; "
-                 +"p=kagglehub.dataset_download('debeshjha1/kvasirseg'); "
-                 +"Path("+repr(str(marker))+").write_text(str(p),encoding='utf-8')")
-        run_cmd([sys.executable,'-c',snippet],name='kagglehub_kvasir_fetch',max_seconds=1800)
-        path=Path(marker.read_text(encoding='utf-8').strip())
+        if not archive.is_file() or not zipfile.is_zipfile(archive):
+            # Bound network I/O to the session deadline. TLS verification stays on.
+            code = ("from pathlib import Path; "
+                    "from scripts.prepare_kvasir_seg import _maybe_download; "
+                    "_maybe_download("+repr(url)+", Path("+repr(str(archive))+")")
+            run_cmd([sys.executable, '-c', code], cwd=REPO,
+                    name='download_kvasir_official', max_seconds=1200)
+        result = _find_valid_kvasir_input(download_dir)
+        if not result:
+            raise RuntimeError('Official ZIP did not have exactly 1000 paired images/masks')
+        print('[DATA] Verified 1000 Kvasir-SEG image/mask pairs:', result[1], flush=True)
+        return result, 'official_simula_https'
     except Exception as exc:
-        raise RuntimeError('Kaggle dataset retrieval failed. Add the public Kvasir-SEG '
-            'dataset (debeshjha1/kvasirseg) under Kaggle Add Input, then rerun. '
-            'You may also provide BT_DATA_KVASIR_SEG_SOURCE or BT_DATA_KVASIR_SEG_ZIP.') from exc
-    result=_find_valid_kvasir_input(path)
-    if not result:
-        raise RuntimeError('Kaggle Kvasir-SEG download did not contain the expected '
-            '1000 paired images and masks: '+str(path))
-    print('[DATA] Verified 1000 image/mask pairs from:',result[1],flush=True)
-    return result, 'kagglehub:'+handle
+        failures.append('Simula direct download: '+str(exc))
+        print('[DATA WARNING] Official download failed:', str(exc), flush=True)
+        archive.unlink(missing_ok=True)
+
+    # Unlike kagglehub, Kaggle CLI can download a public dataset via authenticated
+    # API access rather than asking the Notebook service to attach a new input.
+    # If Kaggle CLI credentials are unavailable, the clear error below instructs
+    # users to attach a dataset in the notebook editor instead.
+    try:
+        cli_dir = download_dir / 'kaggle_cli'
+        cli_dir.mkdir(parents=True, exist_ok=True)
+        run_cmd([sys.executable, '-m', 'kaggle', 'datasets', 'download',
+                 '-d', 'debeshjha1/kvasirseg', '-p', str(cli_dir)],
+                cwd=REPO, name='download_kvasir_kaggle_cli', max_seconds=900)
+        result = _find_valid_kvasir_input(cli_dir)
+        if not result:
+            raise RuntimeError('CLI archive did not contain 1000 Kvasir-SEG pairs')
+        print('[DATA] Verified 1000 Kvasir-SEG image/mask pairs:', result[1], flush=True)
+        return result, 'kaggle_cli_public_dataset'
+    except Exception as exc:
+        failures.append('Kaggle CLI download: '+str(exc))
+        print('[DATA WARNING] Optional Kaggle CLI fallback failed:', str(exc), flush=True)
+
+    raise RuntimeError(
+        'Automatic Kvasir-SEG retrieval failed. In the Kaggle Notebook editor, '
+        'click Add Input -> Datasets and attach debeshjha1/kvasirseg BEFORE running '
+        'the notebook. Alternatively set DATA_FOLDERS={"kvasir_seg": '
+        '"/kaggle/input/<dataset-folder>"} or DATA_ZIPS for a valid ZIP. '
+        'Keep FIRST_EXPERIMENT unchanged. Details: ' + ' | '.join(failures)
+    )
 
 
 def setup_datasets():
     sys.path.insert(0,str(REPO))
     from scripts.revision.audit_splits import audit
     datasets=set(SPEC.get('sources',[])+SPEC.get('targets',[])+[SPEC['dataset']])
+    if SCOPE == 'AUTO':
+        unsupported = datasets - AUTO_DATASETS
+        if unsupported:
+            raise RuntimeError('AUTO queue unexpectedly includes non-direct datasets: '+str(sorted(unsupported)))
     for dataset in sorted(datasets):
         if dataset in PREPARED:
             if dataset in DATASET_META:
@@ -277,20 +327,32 @@ def setup_datasets():
         args=[sys.executable,'scripts/prepare_dataset.py','--dataset',dataset,'--data-root',str(DATA),'--image-size',str(SPEC['image_size'])]
         source_path=os.getenv('BT_DATA_'+dataset.upper()+'_SOURCE')
         zip_path=os.getenv('BT_DATA_'+dataset.upper()+'_ZIP')
+        if SCOPE == 'AUTO':
+            # Let the existing preparation utility fetch the registered public HTTPS
+            # archive directly. No manual Kaggle Input, kagglehub attach, gdown,
+            # 1,000-pair audit, or slow content hashing. Its minimum parsing and
+            # train/val/test split creation are still required to actually train.
+            source_path = None
+            zip_path = None
+            from src.datasets.registry import get_dataset_spec
+            source_url = get_dataset_spec(dataset).default_download_url
+            RUN_META.setdefault('dataset_provenance',{})[dataset] = {
+                'source':'public_https_direct_auto', 'url':source_url}
+            print('[AUTO DOWNLOAD]',dataset,source_url,flush=True)
         if source_path:
             args+=['--source-dir',source_path]
             RUN_META.setdefault('dataset_provenance',{})[dataset]={'source':'explicit_source_dir','path':source_path}
         elif zip_path:
             args+=['--zip-path',zip_path]
             RUN_META.setdefault('dataset_provenance',{})[dataset]={'source':'explicit_zip','path':zip_path}
-        elif dataset=='kvasir_seg':
+        elif dataset=='kvasir_seg' and SCOPE != 'AUTO':
             (flag,path,sha),where=_resolve_kvasir_kaggle()
             args += [flag,path]
             RUN_META.setdefault('dataset_provenance',{})[dataset]={
                 'source':where,'path':path,'sha256_of_input':sha,
                 'original_image_mask_pairs':1000}
         run_cmd(args,cwd=REPO,max_seconds=3600,name='prepare_'+dataset)
-        if dataset=='kvasir_seg':
+        if dataset=='kvasir_seg' and SCOPE != 'AUTO':
             metadata=DATA/'processed'/'kvasir_seg'/'metadata.csv'
             if not metadata.is_file():
                 raise FileNotFoundError('Kvasir metadata missing after preparation: '+str(metadata))
@@ -315,6 +377,15 @@ def setup_datasets():
             RUN_META.setdefault('split_protocol',{})[dataset]='user_supplied_grouped_or_official'
         else:
             RUN_META.setdefault('split_protocol',{})[dataset]='exploratory_random_image_split_seed42'
+        if SCOPE == 'AUTO':
+            # Fast track: no per-file hashes, size assertions, duplication audits,
+            # or manual data-source verification. Basic dataset preparation and
+            # split generation above remain mandatory to prevent bogus results.
+            PREPARED.add(dataset)
+            DATASET_META[dataset] = {'dataset_provenance':RUN_META['dataset_provenance'][dataset],
+                                     'split_protocol':RUN_META['split_protocol'][dataset]}
+            print('[AUTO READY]',dataset,flush=True)
+            continue
         # Strict manifest existence + overlap checks, no implicit fallback.
         for part in ['train','val','test']:
             p=DATA/'splits'/dataset/(part+'.txt')
@@ -340,6 +411,8 @@ def setup_datasets():
         DATASET_META[dataset]={key:__import__('copy').deepcopy(RUN_META.get(key,{}).get(dataset))
                             for key in ('dataset_provenance','split_protocol',
                                         'dataset_content_sha256','dataset_sample_counts')}
+    if SCOPE == 'AUTO':
+        return
     sys.path.insert(0,str(REPO))
     from scripts.revision.run_full_revision import check_splits
     check_splits(DATA,datasets,'test')
@@ -484,7 +557,8 @@ _decoded_queues = {key: json.loads(zlib.decompress(base64.b64decode(value)))
 for _name, _jobs in _decoded_queues.items():
     _digest = hashlib.sha256(json.dumps(_jobs,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     assert _digest == QUEUE_SHA256_BY_SCOPE[_name], f'{_name} source plan checksum mismatch'
-if SCOPE == 'ALL':
+AUTO_DATASETS = frozenset({'kvasir_seg', 'kvasir_instrument', 'isbi2012', 'hyper_kvasir_seg'})
+if SCOPE in ('ALL','AUTO'):
     # Keep original job specs completely unchanged. Only the presentation order is updated:
     # primary comparisons, reviewer ablations, convergence, then extensions and baselines.
     _joined = _decoded_queues['CORE'] + _decoded_queues['OPTIONAL']
@@ -503,12 +577,17 @@ if SCOPE == 'ALL':
         return (rank, dataset_rank.get(spec['dataset'],99),
                 model_rank.get(spec.get('model',''),10),
                 spec.get('model',''), spec.get('variant',''), spec['seed'], spec['id'])
+    if SCOPE == 'AUTO':
+        # Omit jobs needing Google Drive / manual input, including cross-domain
+        # jobs whose training or testing target is not directly downloadable.
+        _joined = [spec for spec in _joined if
+            {spec['dataset'], *spec.get('sources',[]), *spec.get('targets',[])}.issubset(AUTO_DATASETS)]
     QUEUE = sorted(_joined, key=_priority)
     QUEUE_SHA256 = hashlib.sha256(json.dumps(QUEUE,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 else:
     QUEUE = _decoded_queues[SCOPE]
     QUEUE_SHA256 = QUEUE_SHA256_BY_SCOPE[SCOPE]
-assert len(QUEUE) == {'CORE':129,'OPTIONAL':132,'ALL':261}[SCOPE]
+assert len(QUEUE) == {'CORE':129,'OPTIONAL':132,'ALL':261,'AUTO':153}[SCOPE]
 assert len({x['id'] for x in QUEUE}) == len(QUEUE)
 assert all(x['epochs'] in (30,50,100) and x['batch_size']==6 and x['image_size']==352 for x in QUEUE)
 
@@ -595,7 +674,7 @@ def export_plan():
                 'variant':spec.get('variant',''), 'seed':spec['seed'],
                 'epochs':spec['epochs'],'image_size':spec['image_size'],
                 'batch_size':spec['batch_size'],
-                'needs_extra_sources': spec['dataset']!='kvasir_seg' or bool(spec.get('targets')),
+                'needs_extra_sources': False if SCOPE=='AUTO' else (spec['dataset']!='kvasir_seg' or bool(spec.get('targets'))),
             })
     print('[PLAN]',len(QUEUE),'jobs',PLAN_CSV,'sha256',QUEUE_SHA256,flush=True)
 
@@ -605,6 +684,9 @@ def bundle_session(status):
     if not args.bundle_session:
         return
     archives=[Path(s) for s in status.get('session_archives',[])]
+    if SCOPE == 'AUTO' and not archives:
+        print('[AUTO] No completed experiments: no empty session ZIP created.', flush=True)
+        return
     for a in archives:
         if not a.is_file() or not zipfile.is_zipfile(a):
             raise RuntimeError('Cannot bundle missing/invalid completed archive: '+str(a))
@@ -623,6 +705,7 @@ def bundle_session(status):
     manifest={
         'scope':SCOPE,'plan_sha256':QUEUE_SHA256,'first_experiment_number':first,
         'last_completed_experiment_number':last,'next_experiment_number':last+1,
+        'total_experiments':len(QUEUE),
         'git_commit':status.get('git_commit'), 'completed_ids':status['completed_ids'],
         'archives':[{'name':a.name,'sha256':sha256_path(a),
                      'bytes':a.stat().st_size} for a in archives],

@@ -22,9 +22,9 @@ def sha256_stream(reader):
     return h.hexdigest()
 
 
-def collect(input_dir:Path):
+def collect(input_dir:Path, scope='ALL'):
     packages=[]
-    for file in sorted(input_dir.glob('BT_UNET_SESSION_ALL_*.zip')):
+    for file in sorted(input_dir.glob(f'BT_UNET_SESSION_{scope}_*.zip')):
         with zipfile.ZipFile(file) as z:
             m=json.loads(z.read('session_bundle_manifest.json'))
             archives=m['archives']
@@ -43,8 +43,10 @@ def collect(input_dir:Path):
                     raise ValueError(f'Bad checksum for {inner} in {file}')
             packages.append((file,m))
     if not packages:
-        raise FileNotFoundError(f'No BT_UNET_SESSION_ALL_*.zip found in {input_dir}')
+        raise FileNotFoundError(f'No BT_UNET_SESSION_{scope}_*.zip found in {input_dir}')
     packages.sort(key=lambda item:item[1]['first_experiment_number'])
+    if any(m.get('scope') != scope for _,m in packages):
+        raise ValueError('Session scope mismatch')
     hashes={m['plan_sha256'] for _,m in packages}
     commits={m['git_commit'] for _,m in packages}
     if len(hashes)!=1 or len(commits)!=1:
@@ -62,13 +64,16 @@ def collect(input_dir:Path):
     return packages,next_index
 
 
-def merge(input_dir,output,require_complete=False):
+def merge(input_dir,output,require_complete=False,scope='ALL'):
     input_dir=Path(input_dir);output=Path(output)
-    packages,next_exp=collect(input_dir)
-    if require_complete and next_exp!=262:
-        raise ValueError(f'Expected 261 completed experiments; next experiment is {next_exp}')
+    packages,next_exp=collect(input_dir,scope=scope)
+    total=packages[0][1].get('total_experiments',261 if scope=='ALL' else None)
+    if total is None or any(m.get('total_experiments',total)!=total for _,m in packages):
+        raise ValueError('Unknown or inconsistent queue length')
+    if require_complete and next_exp!=total+1:
+        raise ValueError(f'Expected {total} completed experiments; next experiment is {next_exp}')
     if output.exists():raise FileExistsError(output)
-    if output.parent.resolve()==input_dir.resolve() and output.name.startswith('BT_UNET_SESSION_ALL_'):
+    if output.parent.resolve()==input_dir.resolve() and output.name.startswith(f'BT_UNET_SESSION_{scope}_'):
         raise ValueError('Choose an aggregate name different from a session package')
     needed=sum(Path(file).stat().st_size for file,_ in packages)
     if shutil.disk_usage(output.parent).free<needed+100*1024*1024:
@@ -83,7 +88,7 @@ def merge(input_dir,output,require_complete=False):
                       'completed_experiments':next_exp-1,
                       'next_experiment':next_exp,
                       'session_files':[f.name for f,_ in packages],
-                      'includes_complete_261': next_exp==262}
+                      'total_experiments':total, 'includes_complete_queue': next_exp==total+1}
             target.writestr('MERGE_MANIFEST.json',json.dumps(overview,indent=2))
             for file,manifest in packages:
                 with zipfile.ZipFile(file) as session:
@@ -103,7 +108,7 @@ def merge(input_dir,output,require_complete=False):
     finally:
         if partial.exists(): partial.unlink()
     print('Created:',output)
-    print('Completed:',next_exp-1,'/261; next experiment:',next_exp)
+    print('Completed:',next_exp-1,f'/{total}; next experiment:',next_exp)
     print('Git SHA:',packages[0][1]['git_commit'])
 
 
@@ -112,7 +117,8 @@ def main():
     ap.add_argument('--input-dir',required=True)
     ap.add_argument('--output',required=True)
     ap.add_argument('--require-complete',action='store_true')
+    ap.add_argument('--scope',choices=['ALL','AUTO'],default='ALL')
     args=ap.parse_args()
-    merge(args.input_dir,args.output,args.require_complete)
+    merge(args.input_dir,args.output,args.require_complete,args.scope)
 
 if __name__=='__main__':main()

@@ -20,7 +20,9 @@ FIRST_EXPERIMENT = 1            # Next session: paste NEXT_EXPERIMENT from previ
 PINNED_COMMIT = ""              # Recommended: paste the full SHA printed on session #1.
 SESSION_HOURS = 11.0           # Includes git clone, dependencies, data, experiments, ZIP.
 
-# Attach datasets in Kaggle "Add Input" if public auto-download fails.
+# Data source priority: existing attached Input -> official HTTPS download ->
+# authenticated Kaggle CLI. Non-interactive kagglehub attachment is NOT used.
+# If network downloads are blocked, use Kaggle editor -> Add Input first.
 # Keys are dataset IDs from src/datasets/registry.py, values are mounted paths.
 # Existing extracted datasets: DATA_FOLDERS. ZIP archives: DATA_ZIPS.
 DATA_FOLDERS = {}  # e.g. {'etis': '/kaggle/input/my-etis-dataset'}
@@ -44,9 +46,27 @@ if not isinstance(FIRST_EXPERIMENT,int) or not 1<=FIRST_EXPERIMENT<=262:
 if not 0.25<=SESSION_HOURS<=11.0:
     raise ValueError('SESSION_HOURS must be in [0.25,11]')
 
+# Prevent accidental duplicates when a user reruns the same cell after some
+# successful experiments. After a failed first job, the stored counter remains 1.
+progress_file = work / 'BT_UNET_NEXT_EXPERIMENT_ALL.txt'
+if progress_file.exists():
+    prior_next = int(progress_file.read_text(encoding='utf-8').strip())
+    if FIRST_EXPERIMENT < prior_next:
+        raise RuntimeError(f'This session already completed experiments before #{prior_next}. '
+                           f'Set FIRST_EXPERIMENT = {prior_next} to avoid duplicates.')
+
 if checkout.exists():
-    raise FileExistsError(f'Expected a fresh clone but directory already exists: {checkout}. '
-                          'Use a new Kaggle session or remove the old checkout intentionally.')
+    # Only remove this runner-owned checkout, after verifying its origin. Never
+    # remove datasets, previous session archives, or an arbitrary user folder.
+    if not (checkout / '.git').is_dir():
+        raise RuntimeError(f'The expected checkout path exists but is not a Git clone: {checkout}')
+    existing_remote = subprocess.check_output(
+        ['git', '-C', str(checkout), 'remote', 'get-url', 'origin'], text=True).strip()
+    if existing_remote.rstrip('/').lower() != REPO_URL.rstrip('/').lower():
+        raise RuntimeError('Existing checkout remote does not match REPO_URL; refusing to delete.')
+    import shutil
+    print('[RETRY] Removing runner-owned checkout to start a clean clone; prior ZIPs are preserved.', flush=True)
+    shutil.rmtree(checkout)
 
 os.environ['BT_T4_MONOTONIC_START'] = str(start_monotonic)
 os.environ['BT_KAGGLE_WORKDIR'] = str(work)
@@ -76,9 +96,11 @@ runner=checkout/'scripts/kaggle/multi_t4_runner.py'
 if not runner.is_file():
     raise FileNotFoundError('Updated Kaggle runner not found on GitHub. '
                             'Push the corrected ZIP contents to the repository first.')
-if '--one-based' not in runner.read_text(encoding='utf-8'):
-    raise RuntimeError('GitHub still has the older 0-based Kaggle runner. '
-                       'Commit/push the corrected repository before executing.')
+runner_source = runner.read_text(encoding='utf-8')
+if '--one-based' not in runner_source or 'official_simula_https' not in runner_source:
+    raise RuntimeError('GitHub does not contain the revised 1-based runner with '
+                       'the non-interactive Kaggle dataset-download fix. '
+                       'Push the corrected repository and rerun.')
 
 command=[sys.executable,str(runner),
          '--scope','ALL','--one-based','--start-index',str(FIRST_EXPERIMENT),

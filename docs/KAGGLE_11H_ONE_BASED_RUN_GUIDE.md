@@ -54,7 +54,7 @@ The whole runtime budget includes cloning, dependency setup, downloading dataset
 
 ### Dataset downloads
 
-Kvasir-SEG is retrieved through `kagglehub` (or an attached Kaggle Input) with an explicit 1000-pair source validation. Other datasets use URLs from `src/datasets/registry.py`. **Availability of these external sites is not guaranteed.** If one is blocked, attach the dataset to Kaggle Inputs and supply either:
+Kvasir-SEG now follows **attached Kaggle Input → official Simula HTTPS ZIP → authenticated Kaggle CLI fallback**; it never asks `kagglehub` to attach a new dataset inside a non-interactive run. Every accepted Kvasir source is checked for **exactly 1000 image/mask pairs**. Other datasets use URLs from `src/datasets/registry.py`. **Availability of these external sites is not guaranteed.** If one is blocked, attach the dataset to Kaggle Inputs and supply either:
 
 ```python
 DATA_FOLDERS = {'etis': '/kaggle/input/my-etis-dataset'}
@@ -63,6 +63,16 @@ DATA_ZIPS = {'cvc_clinicdb': '/kaggle/input/my-pranet-dataset/TrainDataset.zip'}
 ```
 
 When an official or patient-level split protocol is needed, provide `REVIEWED_SPLITS_DIR` with `dataset/train.txt`, `dataset/val.txt`, `dataset/test.txt`. Default deterministic image-level splits are not automatically patient-independent or identical to the original benchmark's official protocol.
+
+### Fix for `New Datasets cannot be attached in non-interactive sessions`
+
+This was the original failure before experiment #1 began. The updated runner avoids the blocked `kagglehub.dataset_download()` code path. **Upload/push the corrected repository to GitHub before running the notebook.** `PINNED_COMMIT` must be empty on the first run with the new repository (do not reuse a pre-fix commit SHA).
+
+When using Kaggle's notebook **Save Version / Run All**, the safest fallback is to attach the dataset in the notebook editor *before* running: click **Add Input → Datasets**, search `debeshjha1/kvasirseg` and add it. In most cases its automatically mounted path will be detected; if not, explicitly set `DATA_FOLDERS = {'kvasir_seg': '/kaggle/input/<actual-mounted-name>'}`. The notebook must have Internet enabled to try the public direct HTTPS download.
+
+In the original failed log, `LAST_COMPLETED = 0`, `NEXT_EXPERIMENT = 1`. Keep `FIRST_EXPERIMENT = 1`. The previous empty ZIP `...0001_TO_0000.zip` is a failure log bundle, **not** a completed job. If you rerun the updated notebook in the same Kaggle session, it verifies and refreshes its Git clone without deleting previous result ZIPs.
+
+**Important:** A direct public server might be unavailable from Kaggle, and Kaggle CLI requires valid credentials/permissions. The code cannot force an external provider to serve a file; if both download routes fail, attach the original dataset using Add Input. It never creates synthetic medical data as a fallback.
 
 ## 3. Progress and ZIPs after each session
 

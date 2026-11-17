@@ -99,3 +99,54 @@ def test_merger_detects_missing_intervals(tmp_path,monkeypatch):
         assert 'expected 1' in str(exc)
     else:
         raise AssertionError('Missing first experiment was accepted')
+
+
+def _write_fake_kvasir_zip(path):
+    """Layout-only fixture: 1000 pairs, no real medical images or network access."""
+    path.parent.mkdir(parents=True,exist_ok=True)
+    with zipfile.ZipFile(path,'w',compression=zipfile.ZIP_STORED) as z:
+        for n in range(1000):
+            z.writestr(f'Kvasir-SEG/images/{n:04d}.jpg',b'fake image')
+            z.writestr(f'Kvasir-SEG/masks/{n:04d}.jpg',b'fake mask')
+
+
+def test_kvasir_mount_preferred_no_network(tmp_path,monkeypatch):
+    runner=load_runner(tmp_path,monkeypatch)
+    mount=tmp_path/'input'/'kvasirseg'
+    archive=mount/'kvasir-seg.zip'
+    _write_fake_kvasir_zip(archive)
+    monkeypatch.setenv('BT_KAGGLE_INPUT_ROOT',str(tmp_path/'input'))
+    monkeypatch.setattr(runner,'run_cmd',lambda *a,**kw: (_ for _ in ()).throw(
+        AssertionError('unexpected network download')))
+    resolved,provenance=runner._resolve_kvasir_kaggle()
+    assert resolved[0]=='--zip-path'
+    assert Path(resolved[1])==archive
+    assert provenance=='kaggle_input_mount'
+
+
+def test_kvasir_official_direct_avoids_kagglehub(tmp_path,monkeypatch):
+    runner=load_runner(tmp_path,monkeypatch)
+    monkeypatch.setenv('BT_KAGGLE_INPUT_ROOT',str(tmp_path/'missing_input'))
+    def synthetic_direct(cmd,**kwargs):
+        assert kwargs['name']=='download_kvasir_official'
+        assert 'datasets.simula.no/downloads/kvasir-seg.zip' in str(cmd)
+        assert 'kagglehub' not in str(cmd)
+        dst=runner.SESSION_DATA/'downloads'/'kvasir_seg'/'kvasir-seg.zip'
+        _write_fake_kvasir_zip(dst)
+    monkeypatch.setattr(runner,'run_cmd',synthetic_direct)
+    result,provenance=runner._resolve_kvasir_kaggle()
+    assert result[0]=='--zip-path'
+    assert result[2] and len(result[2])==64
+    assert provenance=='official_simula_https'
+
+
+def test_failed_dataset_download_does_not_advance(tmp_path,monkeypatch):
+    runner=load_runner(tmp_path,monkeypatch)
+    monkeypatch.setenv('BT_KAGGLE_INPUT_ROOT',str(tmp_path/'missing_input'))
+    def fail(*a,**kw):
+        raise RuntimeError('simulated network failure')
+    monkeypatch.setattr(runner,'run_cmd',fail)
+    import pytest
+    with pytest.raises(RuntimeError,match='Add Input'):
+        runner._resolve_kvasir_kaggle()
+    assert 'kagglehub' not in runner._resolve_kvasir_kaggle.__code__.co_names
