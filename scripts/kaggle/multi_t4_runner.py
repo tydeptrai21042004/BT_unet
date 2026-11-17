@@ -12,23 +12,44 @@ import os, sys, time, json, base64, zlib, hashlib, zipfile, subprocess, shutil, 
 from pathlib import Path
 
 parser = argparse.ArgumentParser(description='Run BT_unet experiment queue under a Kaggle 12h T4 budget')
-parser.add_argument('--scope', choices=['CORE','OPTIONAL'], default='CORE')
-parser.add_argument('--start-index', type=int, default=0)
+parser.add_argument('--scope', choices=['ALL','CORE','OPTIONAL'], default='ALL')
+parser.add_argument('--start-index', type=int, default=None,
+    help='Experiment number (1-based when --one-based; else legacy 0-based index)')
+parser.add_argument('--one-based', action='store_true',
+    help='Use human-readable experiment numbers: first experiment is 1')
+parser.add_argument('--bundle-session', action='store_true',
+    help='Also make a single ZIP containing every completed independent job ZIP from this session')
+parser.add_argument('--max-hours', type=float, default=11.0,
+    help='Maximum notebook wall-clock budget, including setup and packaging (default: 11)')
+parser.add_argument('--keep-job-zips', action='store_true',
+    help='Keep loose job ZIPs after a verified session ZIP (doubles saved storage)')
+parser.add_argument('--keep-scratch', action='store_true',
+    help='Preserve unpacked dataset/cache after jobs (consumes Kaggle output quota)')
+parser.add_argument('--plan-csv', action='store_true',
+    help='Write numbered experiment manifest CSV without downloading or training')
 parser.add_argument('--plan-only', action='store_true')
 parser.add_argument('--strict-baselines', action='store_true', help='Stop rather than run specialized paper-aligned reimplementations')
 args = parser.parse_args()
 SCOPE = args.scope
-START_INDEX = args.start_index
+if args.start_index is None:
+    args.start_index = 1 if args.one_based else 0
+if args.one_based and args.start_index < 1:
+    parser.error('--start-index must be at least 1 with --one-based')
+START_INDEX = args.start_index - 1 if args.one_based else args.start_index
 PLAN_ONLY = args.plan_only
 ALLOW_PAPER_ALIGNED_REIMPLEMENTATIONS = not args.strict_baselines
 
 REPO_URL = 'https://github.com/tydeptrai21042004/BT_unet.git'
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 START = float(os.environ.get('BT_T4_MONOTONIC_START', time.monotonic()))
 if START > time.monotonic() + 1 or START < time.monotonic() - 24*3600:
     raise ValueError('Invalid BT_T4_MONOTONIC_START')
-DEADLINE = START + 11*3600 + 10*60
-CLEANUP_RESERVE = 20*60
+if not 0.25 <= args.max_hours <= 11.0:
+    parser.error('--max-hours must be between 0.25 and 11.0')
+DEADLINE = START + args.max_hours*3600
+CLEANUP_RESERVE = min(20*60, args.max_hours*3600/4)
 BASE = Path(os.environ.get('BT_KAGGLE_WORKDIR', '/kaggle/working' if Path('/kaggle/working').exists() else '/tmp/bt_kaggle_test'))
 SPEC={'id':'_bootstrap'}
 CELL_DIR = BASE/'bt_cell_bootstrap'
@@ -41,6 +62,14 @@ RUN_META = {'spec':SPEC,'repo_url':REPO_URL,'status':'initialized',
 
 def remaining():
     return DEADLINE-time.monotonic()
+
+
+def sha256_path(path):
+    h=hashlib.sha256()
+    with Path(path).open('rb') as f:
+        for chunk in iter(lambda:f.read(1024*1024),b''):
+            h.update(chunk)
+    return h.hexdigest()
 
 def hard_check(extra=0):
     if remaining() < CLEANUP_RESERVE+extra:
@@ -136,6 +165,10 @@ def baseline_gate():
               'Never describe these numbers as author-official reproduction.')
     elif name in architectural:
         RUN_META['baseline_fidelity']='architecture_control_NOT_byte_identical_official_code'
+    elif SPEC.get('type')=='revision' and SPEC.get('group') in {'factorial','residual','convergence','primary'}:
+        # Residual controls have labels such as additive_a050; the real architecture
+        # is selected and validated by build_plan(), not by this display label.
+        RUN_META['baseline_fidelity']='BT_unet_repository_reviewer_control'
     elif name.startswith('dapr_'):
         RUN_META['baseline_fidelity']='BT_unet_repository_proposed_or_ablation_model'
     else:
@@ -286,9 +319,27 @@ def setup_datasets():
         for part in ['train','val','test']:
             p=DATA/'splits'/dataset/(part+'.txt')
             if not p.is_file() or not p.read_text().strip():raise RuntimeError('Missing nonempty dataset-specific split: '+str(p))
+        # Content fingerprints: a fresh session downloads data again; detect source
+        # drift instead of quietly claiming a fully identical experiment.
+        from src.datasets import build_dataset
+        digest=hashlib.sha256()
+        unique_files={}
+        for split_name in ('train','val','test'):
+            for sample_id, image_path, mask_path in build_dataset(
+                    dataset,str(DATA),split=split_name,image_size=SPEC['image_size']).samples:
+                for tag, file_path in (('I',image_path),('M',mask_path)):
+                    unique_files[(tag,str(file_path))]=(tag,sample_id,Path(file_path))
+        for (tag,_path),(kind,sid,source) in sorted(unique_files.items()):
+            digest.update((kind+'\0'+sid+'\0').encode('utf-8'))
+            with source.open('rb') as fh:
+                for chunk in iter(lambda:fh.read(1048576),b''):
+                    digest.update(chunk)
+        RUN_META.setdefault('dataset_content_sha256',{})[dataset]=digest.hexdigest()
+        RUN_META.setdefault('dataset_sample_counts',{})[dataset]=len(unique_files)//2
         PREPARED.add(dataset)
         DATASET_META[dataset]={key:__import__('copy').deepcopy(RUN_META.get(key,{}).get(dataset))
-                            for key in ('dataset_provenance','split_protocol')}
+                            for key in ('dataset_provenance','split_protocol',
+                                        'dataset_content_sha256','dataset_sample_counts')}
     sys.path.insert(0,str(REPO))
     from scripts.revision.run_full_revision import check_splits
     check_splits(DATA,datasets,'test')
@@ -428,11 +479,36 @@ def package_all():
 # Compressed original immutable experiment plans; 129 CORE and 132 OPTIONAL jobs.
 QUEUE_B64_BY_SCOPE = {'CORE': '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', 'OPTIONAL': 'eNrV2uFu2jAUBeB3yW+00kA3iVeZpsgkDkSFJIrTVmzauy+oDFFNi69976XH/6rWmH7SqXRyyvdf2daM5b5wzU+bbb4usrJr62aXbS5fuIfaNMNDZfqheGnt+OVkjodskVVmNM6O53OvZbFaLqfv2b4r9y7bPC0XWVNNP3KjaSszVEVxOVQU14uKwj2uVt+mlzVHs7OXX2D1lC+yY1fZw/Ty69npUPtyLN664dkO0xtMZ5y10zucb1hk46m3N++W/V58pipf5mue6nwDmmqd80zrnCEarDtf3vdc0fUiQvquZ7XSp6Lypc+vYqZPRTWfPr+JlT4ZDjl3uqETxvjipps1Ycx8yrQjJsEgxkszXEIMSrA0YyXE8EdKJ1CeDlB2h66ttn7L5WBavY2nQ+9vPB1yjwuXpdTneDr0XsfTwfa7cFYCPY+Bwu17DBRi74vjwPa/aA5mD4zmAPZBOzZuHnI+kU4DjPEgd74YD2rLo1pS6XUxHuQmF+OB7G5UCHhbC2Zg9rNgBlojCwFAdrBAAF7rCgQA9qzGbZt8+ZjPK/6eSqdvcVzIvYvjQu1foaZUehjHhdzHOC7IXhYKAu9n0RzMnhbNQetrMRDI3hYJwetvkRDAHvf8alwzFE3rxuHlaNtxnvTP8XSanawUuevJSlHbH1+ZSh+UlSI3RFkpZGfkE8FbpCAQs1cKAtGapgwNsnuK0fDaqBjts/qpKZ3gP6ffbyOE8P2gVgyVUL74eVDMACqh5oPnIfGiN47TX0DTtaKfUfx4KyWKH16gFsn7YL0RpWG5Ub0P1hNdGpUV4dIMRlB4uY4Q2stJrbSquXz59LmYwVRzzUfRp+JlsBYl1dQE1qoB1EF541erpk8H5clerRe9/XT6/Dscnd1JsW7vJMTw9rhWGO/A9AWTxGTG8w7M+aiSkLzASlboPfFZZ6/5qKMi8qZR8zlHReQJnt5DTt8dTn3Rv4qJrhcSknc9q5U+VZ0vhX4dM4mquvlE+m28VIrW4J761NKrPrQoobwxVH1iUUJ50qf4uPK/GYv6uUzwiTGYgTkqBjNwZ0QyJc3hMJqXxlQYzQMeB6km/DkwXII6AIZLACc/MgJ75AtmYM56wQzUIY8KSW66i4Thj3WRMNB5jqwBHuRCDYgTXKgBcXSjGlKZ2WI8yMNajAdySiNDsMezYAbmXBbMwBvI+B81BJ/OBIGYo5ogEHduE0CmOcQpwNOY6BTgwOMdX4s/60kaUQc/SSPgFCjAwx4JBYGY86EgEHVY5BOTmxzFyfhjpDgZdKYUcAIPmHI6xGlTToc4evJ1qcyhslLkoVRWCjmhChCxx1VBIObsKgiUH2R//AEDzX54'}
 QUEUE_SHA256_BY_SCOPE = {'CORE': '18988d518b31755ce98920625ca60183b55251881eb94f376fd12976506e24ef', 'OPTIONAL': '24c37d4f27a09e4df6e889f60551a73f6141ed3923540d3f0c281b8f05097ad2'}
-QUEUE = json.loads(zlib.decompress(base64.b64decode(QUEUE_B64_BY_SCOPE[SCOPE])))
-QUEUE_SHA256 = QUEUE_SHA256_BY_SCOPE[SCOPE]
-QUEUE_DATA_CANONICAL = json.dumps(QUEUE,sort_keys=True,separators=(',',':')).encode()
-assert hashlib.sha256(QUEUE_DATA_CANONICAL).hexdigest() == QUEUE_SHA256, "Queue plan digest mismatch"
-assert len(QUEUE) == {'CORE':129,'OPTIONAL':132}[SCOPE]
+_decoded_queues = {key: json.loads(zlib.decompress(base64.b64decode(value)))
+                   for key, value in QUEUE_B64_BY_SCOPE.items()}
+for _name, _jobs in _decoded_queues.items():
+    _digest = hashlib.sha256(json.dumps(_jobs,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    assert _digest == QUEUE_SHA256_BY_SCOPE[_name], f'{_name} source plan checksum mismatch'
+if SCOPE == 'ALL':
+    # Keep original job specs completely unchanged. Only the presentation order is updated:
+    # primary comparisons, reviewer ablations, convergence, then extensions and baselines.
+    _joined = _decoded_queues['CORE'] + _decoded_queues['OPTIONAL']
+    def _priority(spec):
+        typ, group = spec['type'], spec.get('group', '')
+        group_rank = {'convergence':0,'factorial':1,'residual':2}
+        if typ == 'revision': rank=group_rank.get(group,3)
+        elif typ == 'standard': rank=4
+        elif typ == 'cross': rank=5
+        elif typ == 'lowdata': rank=6
+        else: rank=7
+        dataset_rank={'kvasir_seg':0, 'cvc_clinicdb':1,'cvc_colondb':2,
+                      'etis':3,'kvasir_instrument':4,'cvc_300':5,
+                      'isbi2012':6,'hyper_kvasir_seg':7}
+        model_rank={'unet':0,'dapr_unet':1}
+        return (rank, dataset_rank.get(spec['dataset'],99),
+                model_rank.get(spec.get('model',''),10),
+                spec.get('model',''), spec.get('variant',''), spec['seed'], spec['id'])
+    QUEUE = sorted(_joined, key=_priority)
+    QUEUE_SHA256 = hashlib.sha256(json.dumps(QUEUE,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+else:
+    QUEUE = _decoded_queues[SCOPE]
+    QUEUE_SHA256 = QUEUE_SHA256_BY_SCOPE[SCOPE]
+assert len(QUEUE) == {'CORE':129,'OPTIONAL':132,'ALL':261}[SCOPE]
 assert len({x['id'] for x in QUEUE}) == len(QUEUE)
 assert all(x['epochs'] in (30,50,100) and x['batch_size']==6 and x['image_size']==352 for x in QUEUE)
 
@@ -442,12 +518,13 @@ CROSS_CHECKED = set()
 CALIBRATION_CACHE = {}
 JOB_START = START
 EVAL_AND_OUTPUT_RESERVE = 1800
-SESSION = BASE / ('BT_UNET_MULTI_' + SCOPE + '_from_' + str(START_INDEX))
+SESSION = BASE / ('BT_UNET_MULTI_' + SCOPE + '_from_' + str(START_INDEX+1 if args.one_based else START_INDEX))
 SESSION_LOG = SESSION/'session_status.json'
 SESSION_REPO = REPO_ROOT
 SESSION_DATA = SESSION/'data'
 SESSION_RESULTS = SESSION/'job_outputs'
 SESSION_LOGS = SESSION/'session_logs'
+PLAN_CSV = BASE/('BT_UNET_PLAN_'+SCOPE+'.csv')
 SOURCE_META = {}
 
 def _activate(spec):
@@ -503,32 +580,121 @@ def _preflight(train, config, ckpt, evaluations):
         raise RuntimeError('PROJECTED_OVER_BUDGET: defer this job to another T4 session; no partial training starts.')
     return expected
 
+def export_plan():
+    PLAN_CSV.parent.mkdir(parents=True, exist_ok=True)
+    fields=['experiment_number','id','type','group','dataset','model','variant',
+            'seed','epochs','image_size','batch_size','needs_extra_sources']
+    with PLAN_CSV.open('w',newline='',encoding='utf-8') as fp:
+        writer=csv.DictWriter(fp,fieldnames=fields)
+        writer.writeheader()
+        for idx, spec in enumerate(QUEUE,1):
+            writer.writerow({
+                'experiment_number':idx,'id':spec['id'],
+                'type':spec['type'],'group':spec.get('group',''),
+                'dataset':spec['dataset'],'model':spec['model'],
+                'variant':spec.get('variant',''), 'seed':spec['seed'],
+                'epochs':spec['epochs'],'image_size':spec['image_size'],
+                'batch_size':spec['batch_size'],
+                'needs_extra_sources': spec['dataset']!='kvasir_seg' or bool(spec.get('targets')),
+            })
+    print('[PLAN]',len(QUEUE),'jobs',PLAN_CSV,'sha256',QUEUE_SHA256,flush=True)
+
+
+def bundle_session(status):
+    """Archive only verified completed jobs; failures never advance the counter."""
+    if not args.bundle_session:
+        return
+    archives=[Path(s) for s in status.get('session_archives',[])]
+    for a in archives:
+        if not a.is_file() or not zipfile.is_zipfile(a):
+            raise RuntimeError('Cannot bundle missing/invalid completed archive: '+str(a))
+    first=START_INDEX+1
+    last=status['next_index']
+    target=BASE/f'BT_UNET_SESSION_{SCOPE}_{first:04d}_TO_{last:04d}.zip'
+    if target.exists():
+        raise FileExistsError('Session bundle already exists; not overwriting: '+str(target))
+    # A second copy is needed while making a single ZIP. Keep the per-job ZIPs
+    # if disk is insufficient, because they contain the verified research outputs.
+    bundle_bytes=sum(a.stat().st_size for a in archives)
+    if shutil.disk_usage(BASE).free < bundle_bytes + 150*1024*1024:
+        print('[BUNDLE SKIPPED: LOW DISK] Individual job ZIPs are preserved.',flush=True)
+        return
+    temp=target.with_suffix('.zip.partial')
+    manifest={
+        'scope':SCOPE,'plan_sha256':QUEUE_SHA256,'first_experiment_number':first,
+        'last_completed_experiment_number':last,'next_experiment_number':last+1,
+        'git_commit':status.get('git_commit'), 'completed_ids':status['completed_ids'],
+        'archives':[{'name':a.name,'sha256':sha256_path(a),
+                     'bytes':a.stat().st_size} for a in archives],
+        'stop_reason':status.get('stop_reason'),
+    }
+    try:
+        with zipfile.ZipFile(temp,'w',allowZip64=True) as z:
+            z.writestr('session_bundle_manifest.json',json.dumps(manifest,indent=2))
+            for filename in [SESSION_LOG, PLAN_CSV, BASE/('BT_UNET_NEXT_'+SCOPE+'.json'),
+                             BASE/('BT_UNET_NEXT_EXPERIMENT_'+SCOPE+'.txt')]:
+                if filename.exists():
+                    z.write(filename,arcname=filename.name,compress_type=zipfile.ZIP_DEFLATED)
+            for archive in archives:
+                z.write(archive,arcname='completed_jobs/'+archive.name,
+                        compress_type=zipfile.ZIP_STORED)
+        with zipfile.ZipFile(temp) as z:
+            if z.testzip() is not None:
+                raise RuntimeError('Invalid session bundle CRC')
+            if len([n for n in z.namelist() if n.startswith('completed_jobs/')])!=len(archives):
+                raise RuntimeError('Incomplete session bundle')
+        temp.replace(target)
+        print('[SESSION ZIP]',target,'size_MB',round(target.stat().st_size/1e6,1),flush=True)
+        if not args.keep_job_zips:
+            # The verified session archive contains byte-identical nested job ZIPs.
+            # Avoid saving all those files twice in Kaggle's limited Output storage.
+            for archive in archives:
+                archive.unlink()
+            print('[ARCHIVE STORAGE] Individual ZIPs are inside the session ZIP; '
+                  'removed duplicate loose copies.',flush=True)
+    finally:
+        if temp.exists(): temp.unlink()
+
+
 def _save_queue(status):
     SESSION_LOG.parent.mkdir(parents=True,exist_ok=True)
     status['session_elapsed_seconds']=round(time.monotonic()-START,1)
     status['remaining_seconds']=round(remaining(),1)
-    status['next_start_index']=status['next_index']
+    status['next_start_index']=status['next_index']  # legacy zero-based
+    status['next_experiment_number']=status['next_index']+1  # user-facing one-based
+    status['last_completed_experiment_number']=status['next_index']
     status['plan_sha256']=QUEUE_SHA256
     tmp=SESSION_LOG.with_suffix('.tmp')
     tmp.write_text(json.dumps(status,ensure_ascii=False,indent=2,default=str)+'\n')
     tmp.replace(SESSION_LOG)
     (BASE/('BT_UNET_NEXT_'+SCOPE+'.json')).write_text(json.dumps({
-       'scope':SCOPE,'next_start_index':status['next_index'],'plan_sha256':QUEUE_SHA256,
+       'scope':SCOPE,'next_start_index':status['next_index'],
+       'next_experiment_number':status['next_index']+1,
+       'last_completed_experiment_number':status['next_index'],
+       'total_experiments':len(QUEUE),
+       'plan_sha256':QUEUE_SHA256,
        'completed_in_this_session':status['completed_ids'],
        'note':'Use NEXT_START_INDEX for next independent Kaggle session. Keep prior result ZIPs.'
     },indent=2)+'\n')
+    (BASE/('BT_UNET_NEXT_EXPERIMENT_'+SCOPE+'.txt')).write_text(
+        str(status['next_index']+1)+'\n',encoding='utf-8')
 
 def run_multi_session():
     global SOURCE_META, ARCHIVE
     if not 0 <= START_INDEX <= len(QUEUE):
         raise ValueError('START_INDEX outside job queue')
-    if PLAN_ONLY:
-        print('PLAN ONLY',SCOPE,'jobs',len(QUEUE),'starting',START_INDEX)
+    export_plan()
+    if PLAN_ONLY or args.plan_csv:
+        print('PLAN ONLY',SCOPE,'jobs',len(QUEUE),'starting experiment',START_INDEX+1)
         for j,s in enumerate(QUEUE[START_INDEX:],START_INDEX):
-            print(f'{j:03d} {s["id"]} | {s["epochs"]} epochs | {s["model"]} | {s["dataset"]}')
+            print(f'{j+1:03d}/{len(QUEUE)} {s["id"]} | {s["epochs"]} epochs | {s["model"]} | {s["dataset"]}')
         return
     if START_INDEX == len(QUEUE):
         print('[COMPLETE QUEUE] All planned jobs already indexed; nothing to train.')
+        status={'scope':SCOPE,'start_index':START_INDEX,'next_index':START_INDEX,
+                'total_jobs':len(QUEUE),'completed_ids':[], 'failed_jobs':[],
+                'stop_reason':'all_jobs_completed', 'git_commit':None,'session_archives':[]}
+        _save_queue(status)
         return
     SESSION.mkdir(parents=True,exist_ok=True)
     status={'scope':SCOPE,'start_index':START_INDEX,'next_index':START_INDEX,
@@ -546,13 +712,18 @@ def run_multi_session():
     except BaseException as exc:
         status['stop_reason']='shared_setup_failed: '+str(exc)
         _save_queue(status)
+        if args.bundle_session:
+            try: bundle_session(status)
+            except Exception as bundle_exc:
+                print('[WARNING] Could not bundle setup failure:',bundle_exc,flush=True)
         raise
     _save_queue(status)
     for index in range(START_INDEX,len(QUEUE)):
         spec=QUEUE[index]
         _activate(spec)
         print('\n'+'='*70,flush=True)
-        print(f'[JOB {index+1}/{len(QUEUE)}] {spec["id"]}',flush=True)
+        print(f'[EXPERIMENT {index+1}/{len(QUEUE)}] {spec["id"]}',flush=True)
+        print(f'[COUNTER] completed_global={index} next_experiment={index+1}',flush=True)
         print('[SESSION ELAPSED]',round((time.monotonic()-START)/3600,2),'h',flush=True)
         try:
             hard_check(extra=1800)
@@ -562,6 +733,12 @@ def run_multi_session():
                 os.environ['BT_ALLOW_PAPER_ALIGNED']='1'
             if shutil.disk_usage(BASE).free < 5*1024**3:
                 raise RuntimeError('DISK_LOW: insufficient disk space to safely train/package next job')
+            # Notebook Output is capped independently of free temporary disk. Leave
+            # room for a single combined ZIP, logs and packaging overhead.
+            stored_bytes=sum(p.stat().st_size for p in BASE.glob('BT_UNET_RESULTS__*.zip'))
+            if stored_bytes > 8*1024**3:
+                raise RuntimeError('DISK_LOW: completed job ZIPs exceed 8GiB; '
+                                   'bundle/download this session before more jobs')
             baseline_gate()
             setup_datasets()
             train,ckpt,evals,config,config_path=make_job()
@@ -577,6 +754,13 @@ def run_multi_session():
                 run_cmd(command,cwd=REPO,max_seconds=min(1800,remaining()-CLEANUP_RESERVE-700),name='eval_'+label)
             if SPEC.get('posthoc'):
                 postprocess(ckpt)
+            for ds in sorted(set(SPEC.get('sources',[])+SPEC.get('targets',[])+[SPEC['dataset']])):
+                for part in ('train','val','test'):
+                    src=DATA/'splits'/ds/(part+'.txt')
+                    if src.is_file():
+                        dest=RESULTS/'split_manifests'/ds/(part+'.txt')
+                        dest.parent.mkdir(parents=True,exist_ok=True)
+                        shutil.copyfile(src,dest)
             RUN_META['status']='complete'
             package_all()  # ONE INDEPENDENT ORIGINAL-AGGREGATOR-COMPATIBLE ZIP PER JOB
             # Outputs are safely preserved in the verified ZIP; release unpacked run data.
@@ -586,7 +770,8 @@ def run_multi_session():
             status['next_index']=index+1
             status['stop_reason']='more_jobs_remaining'
             _save_queue(status)
-            print('[JOB COMPLETE] Next index:',index+1,flush=True)
+            print('[EXPERIMENT COMPLETE]',index+1,'/',len(QUEUE),flush=True)
+            print('[NEXT EXPERIMENT NUMBER]',index+2,flush=True)
             # Keep enough time for a further calibration and emergency finalization.
             if remaining() < CLEANUP_RESERVE+2700:
                 status['stop_reason']='remaining_budget_too_small_for_new_job'
@@ -613,9 +798,23 @@ def run_multi_session():
     if status['next_index'] == len(QUEUE):
         status['stop_reason']='all_jobs_completed'
     _save_queue(status)
+    if args.bundle_session:
+        try:
+            bundle_session(status)
+        except Exception as err:
+            print('[SESSION BUNDLE FAILED; per-job ZIPs preserved]',repr(err),flush=True)
+    if not args.keep_scratch:
+        # Kaggle saves /kaggle/working as notebook output: remove data and temporary
+        # full checkpoints after verified job archives were created.
+        shutil.rmtree(SESSION_DATA,ignore_errors=True)
+        shutil.rmtree(SESSION/'job_work',ignore_errors=True)
+        shutil.rmtree(SESSION_RESULTS,ignore_errors=True)
+        print('[SCRATCH CLEANUP] Removed transient datasets/job working directories',flush=True)
     print('\n'+'='*75)
     print('SCOPE',SCOPE,'COMPLETED THIS SESSION',len(status['completed_ids']))
-    print('NEXT_START_INDEX =',status['next_index'])
+    print('LAST_COMPLETED EXPERIMENT NUMBER =',status['next_index'])
+    print('NEXT_EXPERIMENT =',status['next_index']+1)
+    print('LEGACY NEXT_START_INDEX =',status['next_index'])
     print('REMAINING PLANNED JOBS =',len(QUEUE)-status['next_index'])
     print('STATUS FILE:',SESSION_LOG)
     print('NEXT SESSION STATE:',BASE/('BT_UNET_NEXT_'+SCOPE+'.json'))

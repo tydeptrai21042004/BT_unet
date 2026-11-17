@@ -114,3 +114,17 @@ The project does **not** bundle original third-party GFUNet/AFDSeg model sources
 medical datasets, trained weights, or new measured benchmark results. Official
 spectral models require independently pinned source, an explicit paper-to-code
 audit, and genuine retraining before making empirical comparisons.
+
+
+## Kaggle 11-hour autonomous experiment queue (1-based)
+
+A ready-to-upload notebook is included as `BT_UNet_KAGGLE_11H.ipynb`.
+It clones GitHub, downloads/prepares data, trains independent experiments,
+checks evaluations, and creates a session ZIP. Resume by changing only
+`FIRST_EXPERIMENT` to the number in `BT_UNET_NEXT_EXPERIMENT_ALL.txt`.
+The deterministic queue contains 261 existing 2D experiments. **Official external
+spectral model sources and real CT/MRI 3D experiments are NOT part of this
+queue and require additional approved data/code.**
+
+See `docs/KAGGLE_11H_ONE_BASED_RUN_GUIDE.md` for setup, data sources,
+Kaggle GPU/Internet settings, session output and final archive merging.
