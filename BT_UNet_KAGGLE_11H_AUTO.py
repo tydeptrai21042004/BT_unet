@@ -10,7 +10,7 @@ from pathlib import Path
 # EDIT ONLY FIRST_EXPERIMENT when starting the next independent Kaggle session.
 REPO_URL = 'https://github.com/tydeptrai21042004/BT_unet.git'
 FIRST_EXPERIMENT = 1
-PINNED_COMMIT = ''  # After session 1, pin the full SHA printed below.
+PINNED_COMMIT = ''  # Pin the NEW SHA after pushing the updated code; the previous SHA runs old behavior.
 SESSION_HOURS = 11.0
 TOTAL_EXPERIMENTS = 165
 
@@ -44,8 +44,8 @@ runner=checkout/'scripts/kaggle/multi_t4_runner.py'
 if not runner.is_file():
     raise FileNotFoundError('Kaggle runner missing from GitHub. Push the updated FULL ZIP first.')
 source=runner.read_text(encoding='utf-8')
-if "'AUTO':165" not in source or "SCOPE == 'AUTO'" not in source:
-    raise RuntimeError('GitHub has the old scheduler. Push the AUTO code before running.')
+if "'AUTO':165" not in source or 'PAPER_METRICS_COMPACT_V2' not in source:
+    raise RuntimeError('GitHub has the old scheduler/exporter. Push the updated FULL ZIP to GitHub before running.')
 os.environ['BT_T4_MONOTONIC_START']=str(started)
 os.environ['BT_KAGGLE_WORKDIR']=str(work)
 if PINNED_COMMIT: os.environ['BT_UNET_COMMIT']=PINNED_COMMIT
@@ -58,7 +58,13 @@ if next_file.is_file():
 else:
     print('[SETUP FAILED BEFORE COUNTER] Restart with FIRST_EXPERIMENT =',FIRST_EXPERIMENT)
 archives=sorted(work.glob('BT_UNET_SESSION_AUTO_*.zip'))
-print('[SESSION ZIP FILES]',*[str(x) for x in archives],sep='\n  ')
+print('[COMPACT SESSION ZIP FILES]',*[str(x) for x in archives],sep='\n  ')
+for label in ('BT_UNET_PAPER_RESULTS_AUTO.csv', 'BT_UNET_COMPLETED_RESULTS_AUTO.csv',
+              'BT_UNET_COMPLETED_RESULTS_AUTO.json', 'BT_UNET_PAPER_VALUES_AUTO.tex'):
+    candidate=work/label
+    if candidate.exists():
+        print('[PAPER-READY OUTPUT]',candidate, f'{candidate.stat().st_size} bytes')
+print('[NOTE] AUTO ZIPs contain evaluation metrics, per-image CSV and training histories; no weights/images.')
 print('[SCHEDULER EXIT CODE]',completed.returncode)
 report=work/'BT_UNET_DATASET_PREFLIGHT_AUTO.json'
 if report.is_file():

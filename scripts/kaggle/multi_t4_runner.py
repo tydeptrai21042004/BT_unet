@@ -3,8 +3,10 @@
 
 Use ONLY from a checked-out BT_unet GitHub repository. The standalone Kaggle
 bootstrap clones the repository, pins optional SHA and calls this module.
-Each full experiment yields a separate results ZIP and advances the resume
-index only after training, evaluation, and successful archival.
+AUTO sessions save one compact, paper-ready ZIP containing all completed
+experiment summaries, per-image CSV files and training histories; no checkpoints.
+Other scopes retain the original per-job archival format.
+The resume counter advances only after full training/evaluation/export.
 """
 from __future__ import annotations
 import argparse
@@ -31,6 +33,7 @@ parser.add_argument('--plan-csv', action='store_true',
 parser.add_argument('--plan-only', action='store_true')
 parser.add_argument('--strict-baselines', action='store_true', help='Stop rather than run specialized paper-aligned reimplementations')
 args = parser.parse_args()
+PAPER_METRICS_COMPACT_V2 = True  # Kaggle bootstrap requires the new results-only format
 SCOPE = args.scope
 if args.start_index is None:
     args.start_index = 1 if args.one_based else 0
@@ -493,7 +496,7 @@ def make_job():
     if t=='revision':
         from scripts.revision.run_full_revision import build_plan
         from argparse import Namespace
-        arg=Namespace(groups=SPEC['group'],datasets=SPEC['dataset'],seeds=str(SPEC['seed']),epochs=SPEC['epochs'],data_root=str(DATA),output_root=str(RESULTS/'jobs'),image_size=SPEC['image_size'],batch_size=SPEC['batch_size'],eval_batch_size=4,num_workers=SPEC['num_workers'],device='cuda:0' if not os.environ.get('BT_KAGGLE_TEST_CPU') else 'cpu',split='test',external_configs='',save_predictions=True)
+        arg=Namespace(groups=SPEC['group'],datasets=SPEC['dataset'],seeds=str(SPEC['seed']),epochs=SPEC['epochs'],data_root=str(DATA),output_root=str(RESULTS/'jobs'),image_size=SPEC['image_size'],batch_size=SPEC['batch_size'],eval_batch_size=4,num_workers=SPEC['num_workers'],device='cuda:0' if not os.environ.get('BT_KAGGLE_TEST_CPU') else 'cpu',split='test',external_configs='',save_predictions=SCOPE!='AUTO')
         options=build_plan(arg)
         selected=[j for j in options if j['variant']==SPEC['group']+'_'+SPEC['variant']]
         if len(selected)!=1:raise RuntimeError('Variant not uniquely found in revision run plan')
@@ -529,7 +532,8 @@ def make_job():
     evaluations=[]
     for dataset in targets:
         dst=run_root/'evaluations'/dataset
-        cmd=[sys.executable,'scripts/revision/evaluate_revision.py','--checkpoint',str(ckpt),'--dataset',dataset,'--data-root',str(DATA),'--split','test','--batch-size','4','--image-size',str(SPEC['image_size']),'--num-workers',str(SPEC['num_workers']),'--device','cpu' if os.environ.get('BT_KAGGLE_TEST_CPU') else 'cuda:0','--output-dir',str(dst),'--save-predictions']
+        cmd=[sys.executable,'scripts/revision/evaluate_revision.py','--checkpoint',str(ckpt),'--dataset',dataset,'--data-root',str(DATA),'--split','test','--batch-size','4','--image-size',str(SPEC['image_size']),'--num-workers',str(SPEC['num_workers']),'--device','cpu' if os.environ.get('BT_KAGGLE_TEST_CPU') else 'cuda:0','--output-dir',str(dst)]
+        if SCOPE!='AUTO':cmd.append('--save-predictions')
         evaluations.append((dataset,cmd))
     return train,ckpt,evaluations,cfg,config_path
 
@@ -550,7 +554,7 @@ def calibrate(train,config,ckpt):
         else:cmd.extend([flag,value])
     cost=run_cmd(cmd,cwd=REPO,max_seconds=3600,name='calibration_1epoch')
     RUN_META['calibration_seconds']=round(cost,2)
-    expected_seconds=cost*SPEC['epochs']*2.0
+    expected_seconds=cost*SPEC['epochs']*1.08
     RUN_META['estimated_full_train_seconds']=round(expected_seconds,1)
     print('[PREFLIGHT] 1-epoch wall time',round(cost,1),'s; conservative estimate:',round(expected_seconds/3600,2),'h')
     shutil.rmtree(cal_root,ignore_errors=True)
@@ -675,6 +679,7 @@ SESSION_LOG = SESSION/'session_status.json'
 SESSION_REPO = REPO_ROOT
 SESSION_DATA = SESSION/'data'
 SESSION_RESULTS = SESSION/'job_outputs'
+COMPACT_RESULTS = SESSION/'compact_results'
 SESSION_LOGS = SESSION/'session_logs'
 PLAN_CSV = BASE/('BT_UNET_PLAN_'+SCOPE+'.csv')
 SOURCE_META = {}
@@ -710,20 +715,21 @@ def _calibration_key(config):
 def _preflight(train, config, ckpt, evaluations):
     global EVAL_AND_OUTPUT_RESERVE
     # A realistic conservative bound includes *all* test targets and optional post-hoc GPU work.
-    EVAL_AND_OUTPUT_RESERVE=600 + 1200*len(evaluations) + (6800 if SPEC.get('posthoc') else 0)
+    EVAL_AND_OUTPUT_RESERVE=(240 + 120*len(evaluations) if SCOPE=='AUTO' else 600 + 1200*len(evaluations)) + (6800 if SPEC.get('posthoc') else 0)
     key=_calibration_key(config)
     if key in CALIBRATION_CACHE:
         cost=CALIBRATION_CACHE[key]
         RUN_META['calibration_reused']=True
         RUN_META['calibration_seconds']=round(cost,2)
-        print('[REUSED 1-EPOCH CALIBRATION]',round(cost,1),'s for same config ignoring seed',flush=True)
+        print('[REUSED TIME ESTIMATE]',round(cost,1),'seconds/epoch for same configuration',flush=True)
     else:
         # calibrate() has a budget check after measuring. On failure, the time observation is still logged.
         calibrate(train, config, ckpt)
         cost=RUN_META['calibration_seconds']
         CALIBRATION_CACHE[key]=cost
-    expected=cost*SPEC['epochs']*2.0
+    expected=cost*SPEC['epochs']*1.08
     RUN_META['estimated_full_train_seconds']=round(expected,1)
+    RUN_META['time_estimate_multiplier']=1.08
     RUN_META['evaluation_and_archiving_reserve_seconds']=EVAL_AND_OUTPUT_RESERVE
     print('[BUDGET]',SPEC['id'],'expected GPU train',round(expected/3600,2),'h',
           'eval/analysis & output reserve',round(EVAL_AND_OUTPUT_RESERVE/3600,2),'h',
@@ -760,8 +766,12 @@ def bundle_session(status):
     if SCOPE == 'AUTO' and not archives and not status.get('skipped_jobs'):
         print('[AUTO] No completed experiments or skipped datasets: no empty session ZIP created.', flush=True)
         return
+    compact_auto = (SCOPE == 'AUTO' and any(p.is_dir() for p in archives))
     for a in archives:
-        if not a.is_file() or not zipfile.is_zipfile(a):
+        if compact_auto:
+            if not a.is_dir() or not (a/'paper_row.json').is_file():
+                raise RuntimeError('Missing compact completed result directory: '+str(a))
+        elif not a.is_file() or not zipfile.is_zipfile(a):
             raise RuntimeError('Cannot bundle missing/invalid completed archive: '+str(a))
     first=START_INDEX+1
     last=status['next_index']
@@ -770,7 +780,8 @@ def bundle_session(status):
         raise FileExistsError('Session bundle already exists; not overwriting: '+str(target))
     # A second copy is needed while making a single ZIP. Keep the per-job ZIPs
     # if disk is insufficient, because they contain the verified research outputs.
-    bundle_bytes=sum(a.stat().st_size for a in archives)
+    bundle_bytes=(sum(p.stat().st_size for a in archives for p in a.rglob('*') if p.is_file())
+                  if compact_auto else sum(a.stat().st_size for a in archives))
     if shutil.disk_usage(BASE).free < bundle_bytes + 150*1024*1024:
         print('[BUNDLE SKIPPED: LOW DISK] Individual job ZIPs are preserved.',flush=True)
         return
@@ -783,8 +794,9 @@ def bundle_session(status):
         'git_commit':status.get('git_commit'), 'completed_ids':status['completed_ids'],
         'completed_experiment_numbers':status.get('completed_numbers',[]),
         'skipped_jobs':status.get('skipped_jobs',[]),
-        'archives':[{'name':a.name,'sha256':sha256_path(a),
-                     'bytes':a.stat().st_size} for a in archives],
+        'archives':([{'name':a.name,'format':'compact_metrics','files':len([p for p in a.rglob('*') if p.is_file()])}
+                     for a in archives] if compact_auto else
+                    [{'name':a.name,'sha256':sha256_path(a),'bytes':a.stat().st_size} for a in archives]),
         'stop_reason':status.get('stop_reason'),
     }
     try:
@@ -796,17 +808,30 @@ def bundle_session(status):
                              BASE/('BT_UNET_DATASET_PREFLIGHT_'+SCOPE+'.json')]:
                 if filename.exists():
                     z.write(filename,arcname=filename.name,compress_type=zipfile.ZIP_DEFLATED)
-            for archive in archives:
-                z.write(archive,arcname='completed_jobs/'+archive.name,
-                        compress_type=zipfile.ZIP_STORED)
+            if compact_auto:
+                for filename in sorted(BASE.glob('BT_UNET_*RESULTS_AUTO.*')) + [BASE/'BT_UNET_PAPER_VALUES_AUTO.tex']:
+                    if filename.is_file():
+                        z.write(filename, arcname=filename.name, compress_type=zipfile.ZIP_DEFLATED)
+                for archive in archives:
+                    for filename in sorted(archive.rglob('*')):
+                        if filename.is_file():
+                            z.write(filename, arcname=str(Path('completed_jobs')/archive.name/filename.relative_to(archive)),
+                                    compress_type=zipfile.ZIP_DEFLATED)
+            else:
+                for archive in archives:
+                    z.write(archive,arcname='completed_jobs/'+archive.name,
+                            compress_type=zipfile.ZIP_STORED)
         with zipfile.ZipFile(temp) as z:
             if z.testzip() is not None:
                 raise RuntimeError('Invalid session bundle CRC')
-            if len([n for n in z.namelist() if n.startswith('completed_jobs/')])!=len(archives):
+            if compact_auto:
+                if len([n for n in z.namelist() if n.endswith('/paper_row.json')]) != len(archives):
+                    raise RuntimeError('Incomplete compact result bundle')
+            elif len([n for n in z.namelist() if n.startswith('completed_jobs/')])!=len(archives):
                 raise RuntimeError('Incomplete session bundle')
         temp.replace(target)
         print('[SESSION ZIP]',target,'size_MB',round(target.stat().st_size/1e6,1),flush=True)
-        if not args.keep_job_zips:
+        if not args.keep_job_zips and not compact_auto:
             # The verified session archive contains byte-identical nested job ZIPs.
             # Avoid saving all those files twice in Kaggle's limited Output storage.
             for archive in archives:
@@ -939,7 +964,17 @@ def run_multi_session():
             RUN_META['status']='training'
             # Explicit post-train evaluation/analysis/packaging time is held back.
             train_limit=max(20,remaining()-CLEANUP_RESERVE-EVAL_AND_OUTPUT_RESERVE)
-            run_cmd(train,cwd=REPO,max_seconds=train_limit,name='train_full')
+            actual_train_seconds=run_cmd(train,cwd=REPO,max_seconds=train_limit,name='train_full')
+            RUN_META['actual_train_seconds']=round(actual_train_seconds,2)
+            if SCOPE=='AUTO':
+                # This measured full run is more informative than extrapolation
+                # from one cold-start calibration epoch for subsequent seeds.
+                key=_calibration_key(config)
+                previous=CALIBRATION_CACHE.get(key)
+                observed=actual_train_seconds/SPEC['epochs']
+                CALIBRATION_CACHE[key]=observed
+                print('[LEARNED TIME] measured seconds/epoch',round(observed,2),
+                      'next-seed planning cost',round(CALIBRATION_CACHE[key],2),flush=True)
             if not ckpt.is_file():
                 raise FileNotFoundError('Best checkpoint missing: '+str(ckpt))
             RUN_META['status']='evaluating'
@@ -955,12 +990,21 @@ def run_multi_session():
                         dest.parent.mkdir(parents=True,exist_ok=True)
                         shutil.copyfile(src,dest)
             RUN_META['status']='complete'
-            package_all()  # ONE INDEPENDENT ORIGINAL-AGGREGATOR-COMPATIBLE ZIP PER JOB
-            # Outputs are safely preserved in the verified ZIP; release unpacked run data.
+            if SCOPE=='AUTO':
+                from scripts.kaggle.results_export import export_completed, update_reports, print_paper_result
+                paper_row, compact_dir=export_completed(index+1,SPEC,evals,RESULTS,COMPACT_RESULTS,RUN_META)
+                all_completed=update_reports(BASE,COMPACT_RESULTS,QUEUE)
+                print_paper_result(paper_row)
+                print('[SESSION RESULTS]',len(all_completed),'completed; compact export without weights/images',flush=True)
+                archive_path=compact_dir
+            else:
+                package_all()
+                archive_path=ARCHIVE
+            # Only verified summaries remain. The next job reuses shared datasets.
             shutil.rmtree(RESULTS,ignore_errors=True)
             status['completed_ids'].append(spec['id'])
             status.setdefault('completed_numbers',[]).append(index+1)
-            status['session_archives'].append(str(ARCHIVE))
+            status['session_archives'].append(str(archive_path))
             status['next_index']=index+1
             status['stop_reason']='more_jobs_remaining'
             _save_queue(status)
@@ -981,17 +1025,23 @@ def run_multi_session():
                 RUN_META['error']=reason
                 status['failed_jobs'].append({'index':index,'id':spec['id'],'error':reason})
                 print('[ERROR]',traceback.format_exc(),flush=True)
-                try:
-                    ARCHIVE=BASE/('BT_UNET_FAILED__'+spec['id']+'.zip')
-                    package_all()
-                except Exception as package_exc:
-                    print('[FAILED TO ARCHIVE LOGS]',package_exc)
+                if SCOPE != 'AUTO':
+                    try:
+                        ARCHIVE=BASE/('BT_UNET_FAILED__'+spec['id']+'.zip')
+                        package_all()
+                    except Exception as package_exc:
+                        print('[FAILED TO ARCHIVE LOGS]',package_exc)
+                else:
+                    print('[FAILED JOB] No unverified metrics or heavy checkpoint ZIP exported.',flush=True)
             break
         finally:
             _save_queue(status)
     if status['next_index'] == len(QUEUE):
         status['stop_reason']='queue_processed_with_skips' if status.get('skipped_jobs') else 'all_jobs_completed'
     _save_queue(status)
+    if SCOPE == 'AUTO':
+        from scripts.kaggle.results_export import update_reports
+        update_reports(BASE,COMPACT_RESULTS,QUEUE)
     if args.bundle_session:
         try:
             bundle_session(status)
@@ -1014,7 +1064,8 @@ def run_multi_session():
     print('REMAINING PLANNED JOBS =',len(QUEUE)-status['next_index'])
     print('STATUS FILE:',SESSION_LOG)
     print('NEXT SESSION STATE:',BASE/('BT_UNET_NEXT_'+SCOPE+'.json'))
-    print('RESULTS: each BT_UNET_RESULTS__*.zip in /kaggle/working')
+    print('RESULTS: compact BT_UNET_SESSION_AUTO_*.zip, 165-row BT_UNET_PAPER_RESULTS_AUTO.csv'
+          if SCOPE=='AUTO' else 'RESULTS: each BT_UNET_RESULTS__*.zip in /kaggle/working')
     print('STOP REASON:',status['stop_reason'])
     print('='*75,flush=True)
     # A real setup/training failure must not masquerade as a successful Kaggle

@@ -35,12 +35,20 @@ def collect(input_dir:Path, scope='ALL'):
                 raise ValueError(f'Archive count mismatch: {file}')
             for a in archives:
                 inner='completed_jobs/'+a['name']
-                if inner not in z.namelist():
-                    raise ValueError(f'Missing {inner}: {file}')
-                with z.open(inner) as f:
-                    actual=sha256_stream(f)
-                if actual!=a['sha256']:
-                    raise ValueError(f'Bad checksum for {inner} in {file}')
+                if a.get('format') == 'compact_metrics':
+                    paper_row=inner+'/paper_row.json'
+                    if paper_row not in z.namelist():
+                        raise ValueError(f'Missing compact result {paper_row}: {file}')
+                    row=json.loads(z.read(paper_row))
+                    if int(row['experiment_number']) not in m.get('completed_experiment_numbers',[]):
+                        raise ValueError(f'Unlisted completed experiment {paper_row}: {file}')
+                else:
+                    if inner not in z.namelist():
+                        raise ValueError(f'Missing {inner}: {file}')
+                    with z.open(inner) as f:
+                        actual=sha256_stream(f)
+                    if actual!=a['sha256']:
+                        raise ValueError(f'Bad checksum for {inner} in {file}')
             packages.append((file,m))
     if not packages:
         raise FileNotFoundError(f'No BT_UNET_SESSION_{scope}_*.zip found in {input_dir}')
@@ -111,13 +119,24 @@ def merge(input_dir,output,require_complete=False,scope='ALL'):
                                     json.dumps(manifest,indent=2))
                     for archive in manifest['archives']:
                         entry='completed_jobs/'+archive['name']
-                        # Copy nested ZIPs without recompressing; avoid loading weights into memory.
-                        with session.open(entry) as src, target.open(entry,'w',force_zip64=True) as dst:
-                            shutil.copyfileobj(src,dst,1024*1024)
+                        if archive.get('format') == 'compact_metrics':
+                            # Compact sessions store text files directly, no nested
+                            # per-job ZIP or large checkpoint in the merged archive.
+                            entries=[name for name in session.namelist() if name.startswith(entry+'/')]
+                            if not entries or (entry+'/paper_row.json') not in entries:
+                                raise ValueError('Missing compact experiment '+entry)
+                            for name in entries:
+                                with session.open(name) as src, target.open(name,'w',force_zip64=True) as dst:
+                                    shutil.copyfileobj(src,dst,1024*1024)
+                        else:
+                            with session.open(entry) as src, target.open(entry,'w',force_zip64=True) as dst:
+                                shutil.copyfileobj(src,dst,1024*1024)
                         completed.append(archive['name'])
         with zipfile.ZipFile(partial) as z:
             if z.testzip() is not None:raise RuntimeError('Merged archive CRC check failed')
-            if len([x for x in z.namelist() if x.startswith('completed_jobs/')])!=len(completed):
+            found=[x for x in z.namelist()
+                   if x.startswith('completed_jobs/') and (x.endswith('/paper_row.json') or x.endswith('.zip'))]
+            if len(found)!=len(completed):
                 raise RuntimeError('Merged archive missing completed jobs')
         partial.replace(output)
     finally:

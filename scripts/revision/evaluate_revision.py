@@ -15,7 +15,9 @@ import torch
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from common import ROOT, load_checkpoint, predict_probs, sha256_file, write_csv, write_json
+from common import ROOT, load_checkpoint, sha256_file, write_csv, write_json
+from src.engine.output_utils import parse_model_output
+from scripts.train_one import build_loss
 from audit_splits import manifest_path
 from src.analysis.boundary_metrics import measure_binary
 from src.analysis.frequency_interventions import suppress_band, BANDS
@@ -51,17 +53,44 @@ def run(args):
                 raise ValueError('Cluster map contains missing/duplicate ID or missing cluster')
             cluster_by_id[sid] = group
     rows = []
+    # The validation evaluator measures the configured main-head loss averaged
+    # over batches. Use that identical definition for the held-out test split;
+    # validation loss must never be substituted for test loss.
+    loss_name = str(cfg.get('train', {}).get('loss', 'bce_dice'))
+    loss_fn = build_loss(loss_name).to(device).eval()
+    loss_sum = 0.0
+    loss_batches = 0
     output = Path(args.output_dir)
     intervention = suppress_band(model,args.remove_frequency_band) if args.remove_frequency_band else nullcontext()
     with torch.inference_mode(), intervention:
         for batch in loader:
-            probs = predict_probs(model, batch['image'].to(device)).detach().float().cpu().numpy()
-            masks = batch['mask'].detach().float().cpu().numpy()
+            images = batch['image'].to(device)
+            masks_device = batch['mask'].to(device)
+            logits = parse_model_output(model(images)).main
+            batch_loss = float(loss_fn(logits, masks_device).item())
+            if not np.isfinite(batch_loss):
+                raise ValueError('Non-finite loss on evaluation batch')
+            loss_sum += batch_loss
+            loss_batches += 1
+            probs = torch.sigmoid(logits).detach().float().cpu().numpy()
+            masks = masks_device.detach().float().cpu().numpy()
             for i, sid in enumerate(batch['id']):
                 sid = str(sid)
                 values = measure_binary(probs[i, 0], masks[i, 0], args.threshold, args.boundary_tolerance)
                 if args.cluster_map and sid not in cluster_by_id:
                     raise ValueError(f'Missing group label for evaluation sample {sid}')
+                binary = probs[i, 0] >= args.threshold
+                truth = masks[i, 0] >= .5
+                tp = int(np.logical_and(binary, truth).sum())
+                fp = int(np.logical_and(binary, ~truth).sum())
+                tn = int(np.logical_and(~binary, ~truth).sum())
+                fn = int(np.logical_and(~binary, truth).sum())
+                accuracy = (tp + tn) / max(tp + fp + tn + fn, 1)
+                specificity = tn / max(tn + fp, 1)
+                balanced_accuracy = .5 * (tp / max(tp + fn, 1) + specificity)
+                f2 = 5 * tp / max(5 * tp + 4 * fn + fp, 1)
+                values.update(pixel_accuracy=float(accuracy), specificity=float(specificity),
+                              balanced_accuracy=float(balanced_accuracy), f2_score=float(f2))
                 rows.append({'dataset': args.dataset, 'model': name, 'sample_id': sid,
                              'cluster_id': cluster_by_id.get(sid, ''),
                              'seed': int(training_seed), 'corruption_seed': args.seed, 'split': args.split, 'corruption': args.corruption,
@@ -73,19 +102,47 @@ def run(args):
                         Image.fromarray(np.uint16(np.clip(array,0,1)*65535) if label == 'probabilities'
                                         else np.uint8(array)*255).save(path)
     write_csv(rows, output / 'per_image.csv')
+    metric_keys = ('dice', 'iou', 'precision', 'recall', 'mae',
+                   'boundary_f1', 'hd95_pixels', 'assd_pixels',
+                   'pixel_accuracy', 'specificity', 'balanced_accuracy', 'f2_score')
+    metric_mean = {}
+    metric_std = {}
+    metric_median = {}
+    metric_defined_count = {}
+    for key in metric_keys:
+        values = np.asarray([r[key] for r in rows], dtype=float)
+        good = values[np.isfinite(values)]
+        metric_defined_count[key] = len(good)
+        if len(good):
+            metric_mean[key] = float(good.mean())
+            metric_std[key] = float(good.std(ddof=1)) if len(good) > 1 else 0.0
+            metric_median[key] = float(np.median(good))
+    test_loss = float(loss_sum / loss_batches)
+    metric_mean['loss'] = test_loss
     summary = {'checkpoint_sha256': sha256_file(args.checkpoint), 'model': name, 'dataset': args.dataset,
                'split': args.split, 'num_samples': len(dataset), 'corruption': args.corruption,
                'severity': args.severity, 'training_seed': int(training_seed), 'corruption_seed': args.seed,
                'group_map': str(args.cluster_map) if args.cluster_map else None,
                'removed_frequency_band': args.remove_frequency_band or 'none', 'threshold': args.threshold,
                'input_resolution': img_size, 'boundary_tolerance_pixels': args.boundary_tolerance,
+               'test_loss': test_loss, 'loss_name': loss_name,
+               'loss_protocol': 'configured main-head loss, arithmetic mean of evaluation batch losses (same as validation)',
+               'test_loss_num_batches': loss_batches,
                'distance_undefined_count': sum(not bool(r['distance_defined']) for r in rows),
                'complete_miss_count': sum(int(r['complete_miss']) for r in rows),
                'empty_prediction_count': sum(int(r['empty_prediction']) for r in rows),
-               'metrics_mean': {key: float(np.nanmean([r[key] for r in rows]))
-                                for key in ('dice','iou','precision','recall','mae','boundary_f1','hd95_pixels','assd_pixels')
-                                if np.isfinite([r[key] for r in rows]).any()}}
+               'metrics_mean': metric_mean,
+               'metrics_std_across_images': metric_std,
+               'metrics_median_across_images': metric_median,
+               'metrics_defined_count': metric_defined_count}
     write_json(summary, output / 'summary.json')
+    print('[TEST METRICS]', f'dataset={args.dataset}', f'model={name}', f'seed={training_seed}',
+          ' '.join(f'{k}={metric_mean[k]:.6f}' for k in ('dice','iou','precision','recall','mae','loss')),
+          flush=True)
+    print('[TEST EXTRA]',
+          ' '.join(f'{k}={metric_mean[k]:.6f}' for k in ('boundary_f1','hd95_pixels','assd_pixels',
+                  'pixel_accuracy','specificity','balanced_accuracy','f2_score') if k in metric_mean),
+          flush=True)
     print('Wrote', output / 'per_image.csv', output / 'summary.json')
 
 
