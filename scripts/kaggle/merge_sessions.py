@@ -28,8 +28,8 @@ def collect(input_dir:Path, scope='ALL'):
         with zipfile.ZipFile(file) as z:
             m=json.loads(z.read('session_bundle_manifest.json'))
             archives=m['archives']
-            if not archives and not m.get('completed_ids'):
-                print('[SKIP EMPTY SESSION]',file.name,'no completed experiments')
+            if not archives and not m.get('completed_ids') and not m.get('skipped_jobs'):
+                print('[SKIP EMPTY SESSION]',file.name,'no completed or skipped experiments')
                 continue
             if len(archives)!=len(m['completed_ids']):
                 raise ValueError(f'Archive count mismatch: {file}')
@@ -56,10 +56,18 @@ def collect(input_dir:Path, scope='ALL'):
         if m['first_experiment_number']!=next_index:
             raise ValueError(f'Missing/overlapping experiment numbers: expected {next_index}, '
                              f'got {m["first_experiment_number"]} in {file}')
-        last=m['last_completed_experiment_number']
-        if last < next_index-1:raise ValueError('Invalid last-completed value')
-        if last-next_index+1!=len(m['completed_ids']):
-            raise ValueError(f'Non-contiguous completed jobs in {file}')
+        last=m.get('last_processed_experiment_number',m['last_completed_experiment_number'])
+        if last < next_index-1:raise ValueError('Invalid last-processed value')
+        skipped = m.get('skipped_jobs',[])
+        completed_numbers=m.get('completed_experiment_numbers',list(range(next_index,last+1)))
+        completed_set=set(completed_numbers)
+        skipped_set={item['number'] for item in skipped}
+        if completed_set.intersection(skipped_set):
+            raise ValueError(f'Experiment cannot be both skipped and completed: {file}')
+        if completed_set.union(skipped_set) != set(range(next_index,last+1)):
+            raise ValueError(f'Missing or duplicated processed experiment numbers: {file}')
+        if len(completed_set)!=len(m['completed_ids']):
+            raise ValueError(f'Completed-ID count mismatch: {file}')
         next_index=last+1
     return packages,next_index
 
@@ -70,8 +78,12 @@ def merge(input_dir,output,require_complete=False,scope='ALL'):
     total=packages[0][1].get('total_experiments',261 if scope=='ALL' else None)
     if total is None or any(m.get('total_experiments',total)!=total for _,m in packages):
         raise ValueError('Unknown or inconsistent queue length')
-    if require_complete and next_exp!=total+1:
-        raise ValueError(f'Expected {total} completed experiments; next experiment is {next_exp}')
+    total_completed=sum(len(m['completed_ids']) for _,m in packages)
+    total_skipped=sum(len(m.get('skipped_jobs',[])) for _,m in packages)
+    if require_complete and (next_exp!=total+1 or total_skipped):
+        raise ValueError(f'Expected {total} completed experiments; '
+                         f'{total_completed} completed, {total_skipped} skipped; '
+                         f'next experiment is {next_exp}')
     if output.exists():raise FileExistsError(output)
     if output.parent.resolve()==input_dir.resolve() and output.name.startswith(f'BT_UNET_SESSION_{scope}_'):
         raise ValueError('Choose an aggregate name different from a session package')
@@ -85,10 +97,13 @@ def merge(input_dir,output,require_complete=False,scope='ALL'):
         with zipfile.ZipFile(partial,'w',allowZip64=True) as target:
             overview={'source_git_sha':packages[0][1]['git_commit'],
                       'plan_sha256':packages[0][1]['plan_sha256'],
-                      'completed_experiments':next_exp-1,
+                      'completed_experiments':total_completed,
+                      'skipped_experiments':total_skipped,
+                      'processed_experiments':next_exp-1,
                       'next_experiment':next_exp,
                       'session_files':[f.name for f,_ in packages],
-                      'total_experiments':total, 'includes_complete_queue': next_exp==total+1}
+                      'total_experiments':total,
+                      'includes_complete_queue':next_exp==total+1 and total_skipped==0}
             target.writestr('MERGE_MANIFEST.json',json.dumps(overview,indent=2))
             for file,manifest in packages:
                 with zipfile.ZipFile(file) as session:
@@ -108,7 +123,8 @@ def merge(input_dir,output,require_complete=False,scope='ALL'):
     finally:
         if partial.exists(): partial.unlink()
     print('Created:',output)
-    print('Completed:',next_exp-1,f'/{total}; next experiment:',next_exp)
+    print('Successfully completed:',total_completed,f'/{total}; skipped:',total_skipped,
+          '; next experiment:',next_exp)
     print('Git SHA:',packages[0][1]['git_commit'])
 
 

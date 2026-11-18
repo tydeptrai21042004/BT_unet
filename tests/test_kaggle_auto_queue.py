@@ -22,18 +22,18 @@ def auto(tmp_path, monkeypatch, start=1):
     return mod
 
 
-def test_auto_plan_153_no_private_google_drive(tmp_path):
+def test_auto_plan_165_no_private_google_drive(tmp_path):
     env=os.environ.copy()
     env['BT_KAGGLE_WORKDIR']=str(tmp_path)
     p=subprocess.run([sys.executable,str(SCRIPT),'--scope','AUTO','--one-based',
         '--start-index','1','--plan-only'],cwd=ROOT,env=env,capture_output=True,text=True)
     assert p.returncode==0,p.stderr
-    assert '001/153' in p.stdout and '153/153' in p.stdout
+    assert '001/165' in p.stdout and '165/165' in p.stdout
     rows=list(csv.DictReader((tmp_path/'BT_UNET_PLAN_AUTO.csv').open()))
-    assert len(rows)==153
-    assert [int(x['experiment_number']) for x in rows]==list(range(1,154))
-    assert len({x['id'] for x in rows})==153
-    assert set(x['dataset'] for x in rows)=={'kvasir_seg','kvasir_instrument','isbi2012','hyper_kvasir_seg'}
+    assert len(rows)==165
+    assert [int(x['experiment_number']) for x in rows]==list(range(1,166))
+    assert len({x['id'] for x in rows})==165
+    assert set(x['dataset'] for x in rows)=={'kvasir_seg','kvasir_instrument','isbi2012','hyper_kvasir_seg','bus_uclm'}
     assert all(x['needs_extra_sources']=='False' for x in rows)
     assert all(x['type']!='cross' for x in rows)
 
@@ -52,9 +52,10 @@ def test_auto_prep_calls_public_source_no_pair_audit(tmp_path, monkeypatch):
     r.setup_datasets()
     assert len(calls)==2
     assert 'scripts/prepare_dataset.py' in calls[0]
-    assert not {'--source-dir','--zip-path','--download-url'}.intersection(calls[0])
+    assert not {'--source-dir','--zip-path'}.intersection(calls[0])
     assert 'scripts/make_splits.py' in calls[1]
     assert r.RUN_META['dataset_provenance']['kvasir_seg']['source']=='public_https_direct_auto'
+    assert '--download-url' in calls[0]
     assert 'dataset_content_sha256' not in r.RUN_META
     assert 'kvasir_seg' in r.PREPARED
 
@@ -85,7 +86,7 @@ def test_auto_completed_bundle_and_merge(tmp_path,monkeypatch):
     assert (tmp_path/'BT_UNET_NEXT_EXPERIMENT_AUTO.txt').read_text().strip()=='2'
     with zipfile.ZipFile(zipped) as z:
         manifest=json.loads(z.read('session_bundle_manifest.json'))
-        assert manifest['total_experiments']==153
+        assert manifest['total_experiments']==165
         assert manifest['next_experiment_number']==2
     from scripts.kaggle.merge_sessions import collect,merge
     packages,nxt=collect(tmp_path,scope='AUTO')
@@ -93,6 +94,6 @@ def test_auto_completed_bundle_and_merge(tmp_path,monkeypatch):
     try:
         merge(tmp_path,tmp_path/'final.zip',require_complete=True,scope='AUTO')
     except ValueError as exc:
-        assert 'Expected 153' in str(exc)
+        assert 'Expected 165' in str(exc)
     else:
         raise AssertionError('Incomplete results should not be declared complete')

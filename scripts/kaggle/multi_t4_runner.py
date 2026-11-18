@@ -310,6 +310,48 @@ def _resolve_kvasir_kaggle():
     )
 
 
+def preflight_auto_datasets():
+    """Fail fast on inaccessible public ZIP hosts, before starting GPU work.
+
+    A 4-byte HTTP probe does not establish download success. Extraction failures
+    are handled by the job loop and also recorded as SKIPPED, never COMPLETE.
+    """
+    if SCOPE != 'AUTO':
+        return
+    report = BASE/'BT_UNET_DATASET_PREFLIGHT_AUTO.json'
+    run_cmd([sys.executable, 'scripts/kaggle/dataset_preflight.py',
+             '--output', str(report), '--seconds', '115'], cwd=REPO,
+            max_seconds=155, name='auto_dataset_preflight')
+    record=json.loads(report.read_text(encoding='utf-8'))
+    for dataset in sorted(AUTO_DATASETS):
+        details=record.get('datasets',{}).get(dataset, {})
+        if details.get('available') and details.get('selected',{}).get('url'):
+            AUTO_SOURCE_URLS[dataset]=details['selected']['url']
+        else:
+            AUTO_UNAVAILABLE[dataset]='preflight failed: '+ ' | '.join(details.get('errors',[]))
+    print('[AUTO PREFLIGHT] usable',sorted(AUTO_SOURCE_URLS),
+          '| skipped datasets',sorted(AUTO_UNAVAILABLE),flush=True)
+
+
+def _auto_needs(spec):
+    return set(spec.get('sources',[]) + spec.get('targets',[]) + [spec['dataset']])
+
+
+def _auto_skip(status,index,spec):
+    unavailable=sorted(_auto_needs(spec).intersection(AUTO_UNAVAILABLE))
+    if not unavailable:
+        raise ValueError('Called auto skip for an available dataset')
+    skip={'number':index+1,'id':spec['id'], 'dataset':spec['dataset'],
+          'unavailable_datasets':unavailable,
+          'reason':{name:AUTO_UNAVAILABLE[name] for name in unavailable}}
+    status.setdefault('skipped_jobs',[]).append(skip)
+    status['next_index']=index+1
+    status['stop_reason']='skipped_unavailable_datasets'
+    print(f'[AUTO SKIPPED {index+1}/{len(QUEUE)}] {spec["id"]} | '
+          + ', '.join(unavailable) + ' | NOT counted as completed',flush=True)
+    _save_queue(status)
+
+
 def setup_datasets():
     sys.path.insert(0,str(REPO))
     from scripts.revision.audit_splits import audit
@@ -335,9 +377,15 @@ def setup_datasets():
             source_path = None
             zip_path = None
             from src.datasets.registry import get_dataset_spec
-            source_url = get_dataset_spec(dataset).default_download_url
+            source_url = AUTO_SOURCE_URLS.get(dataset, get_dataset_spec(dataset).default_download_url)
+            if not source_url:
+                raise RuntimeError('No selected public HTTPS archive URL for '+dataset)
+            # Use the exact URL that passed the lightweight preflight, including
+            # the official institution-operated mirror when selected.
+            args += ['--download-url', source_url]
             RUN_META.setdefault('dataset_provenance',{})[dataset] = {
-                'source':'public_https_direct_auto', 'url':source_url}
+                'source':'public_https_direct_auto', 'url':source_url,
+                'probe_only_not_full_download_verification':True}
             print('[AUTO DOWNLOAD]',dataset,source_url,flush=True)
         if source_path:
             args+=['--source-dir',source_path]
@@ -351,7 +399,13 @@ def setup_datasets():
             RUN_META.setdefault('dataset_provenance',{})[dataset]={
                 'source':where,'path':path,'sha256_of_input':sha,
                 'original_image_mask_pairs':1000}
-        run_cmd(args,cwd=REPO,max_seconds=3600,name='prepare_'+dataset)
+        # AUTO mode only: use standard verified HTTPS first. If Simula's CA chain
+        # is unavailable on this Kaggle image, allow a visible host-scoped retry.
+        download_env=None
+        if SCOPE == 'AUTO':
+            download_env=os.environ.copy()
+            download_env['BT_AUTO_DATASET_TLS_FALLBACK']='1'
+        run_cmd(args,cwd=REPO,max_seconds=900 if SCOPE=='AUTO' else 3600,name='prepare_'+dataset,env=download_env)
         if dataset=='kvasir_seg' and SCOPE != 'AUTO':
             metadata=DATA/'processed'/'kvasir_seg'/'metadata.csv'
             if not metadata.is_file():
@@ -557,7 +611,7 @@ _decoded_queues = {key: json.loads(zlib.decompress(base64.b64decode(value)))
 for _name, _jobs in _decoded_queues.items():
     _digest = hashlib.sha256(json.dumps(_jobs,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     assert _digest == QUEUE_SHA256_BY_SCOPE[_name], f'{_name} source plan checksum mismatch'
-AUTO_DATASETS = frozenset({'kvasir_seg', 'kvasir_instrument', 'isbi2012', 'hyper_kvasir_seg'})
+AUTO_DATASETS = frozenset({'kvasir_seg', 'kvasir_instrument', 'isbi2012', 'hyper_kvasir_seg', 'bus_uclm'})
 if SCOPE in ('ALL','AUTO'):
     # Keep original job specs completely unchanged. Only the presentation order is updated:
     # primary comparisons, reviewer ablations, convergence, then extensions and baselines.
@@ -572,12 +626,26 @@ if SCOPE in ('ALL','AUTO'):
         else: rank=7
         dataset_rank={'kvasir_seg':0, 'cvc_clinicdb':1,'cvc_colondb':2,
                       'etis':3,'kvasir_instrument':4,'cvc_300':5,
-                      'isbi2012':6,'hyper_kvasir_seg':7}
+                      'bus_uclm':6,'isbi2012':7,'hyper_kvasir_seg':8}
         model_rank={'unet':0,'dapr_unet':1}
         return (rank, dataset_rank.get(spec['dataset'],99),
                 model_rank.get(spec.get('model',''),10),
                 spec.get('model',''), spec.get('variant',''), spec['seed'], spec['id'])
     if SCOPE == 'AUTO':
+        # Independent ultrasound experiments, following the existing ISBI standard
+        # 2D comparison protocol; source: public Mendeley BUS-UCLM ZIP.
+        # Keep the exact archive URL in provenance (the registry's URL ends -1.zip).
+        # Do NOT infer the archive is identical to the published V3 release.
+        # They are NEW jobs, not renames/substitutions of any polyp dataset.
+        import copy
+        bus_jobs=[]
+        for base_job in _joined:
+            if base_job['dataset']=='isbi2012' and base_job['type']=='standard':
+                new_spec=copy.deepcopy(base_job)
+                new_spec['dataset']='bus_uclm'
+                new_spec['id']=base_job['id'].replace('isbi2012','bus_uclm')
+                bus_jobs.append(new_spec)
+        _joined += bus_jobs
         # Omit jobs needing Google Drive / manual input, including cross-domain
         # jobs whose training or testing target is not directly downloadable.
         _joined = [spec for spec in _joined if
@@ -587,12 +655,17 @@ if SCOPE in ('ALL','AUTO'):
 else:
     QUEUE = _decoded_queues[SCOPE]
     QUEUE_SHA256 = QUEUE_SHA256_BY_SCOPE[SCOPE]
-assert len(QUEUE) == {'CORE':129,'OPTIONAL':132,'ALL':261,'AUTO':153}[SCOPE]
+assert len(QUEUE) == {'CORE':129,'OPTIONAL':132,'ALL':261,'AUTO':165}[SCOPE]
 assert len({x['id'] for x in QUEUE}) == len(QUEUE)
 assert all(x['epochs'] in (30,50,100) and x['batch_size']==6 and x['image_size']==352 for x in QUEUE)
 
 PREPARED = set()
 DATASET_META = {}
+# URL probes run on Kaggle itself, not on the offline packaging machine.
+# Keep skipped job identifiers separate from successfully completed ones.
+AUTO_SOURCE_URLS = {}
+AUTO_UNAVAILABLE = {}
+
 CROSS_CHECKED = set()
 CALIBRATION_CACHE = {}
 JOB_START = START
@@ -684,8 +757,8 @@ def bundle_session(status):
     if not args.bundle_session:
         return
     archives=[Path(s) for s in status.get('session_archives',[])]
-    if SCOPE == 'AUTO' and not archives:
-        print('[AUTO] No completed experiments: no empty session ZIP created.', flush=True)
+    if SCOPE == 'AUTO' and not archives and not status.get('skipped_jobs'):
+        print('[AUTO] No completed experiments or skipped datasets: no empty session ZIP created.', flush=True)
         return
     for a in archives:
         if not a.is_file() or not zipfile.is_zipfile(a):
@@ -704,9 +777,12 @@ def bundle_session(status):
     temp=target.with_suffix('.zip.partial')
     manifest={
         'scope':SCOPE,'plan_sha256':QUEUE_SHA256,'first_experiment_number':first,
-        'last_completed_experiment_number':last,'next_experiment_number':last+1,
+        'last_completed_experiment_number':max(status.get('completed_numbers',[]) or [0]),
+        'last_processed_experiment_number':last,'next_experiment_number':last+1,
         'total_experiments':len(QUEUE),
         'git_commit':status.get('git_commit'), 'completed_ids':status['completed_ids'],
+        'completed_experiment_numbers':status.get('completed_numbers',[]),
+        'skipped_jobs':status.get('skipped_jobs',[]),
         'archives':[{'name':a.name,'sha256':sha256_path(a),
                      'bytes':a.stat().st_size} for a in archives],
         'stop_reason':status.get('stop_reason'),
@@ -715,7 +791,9 @@ def bundle_session(status):
         with zipfile.ZipFile(temp,'w',allowZip64=True) as z:
             z.writestr('session_bundle_manifest.json',json.dumps(manifest,indent=2))
             for filename in [SESSION_LOG, PLAN_CSV, BASE/('BT_UNET_NEXT_'+SCOPE+'.json'),
-                             BASE/('BT_UNET_NEXT_EXPERIMENT_'+SCOPE+'.txt')]:
+                             BASE/('BT_UNET_NEXT_EXPERIMENT_'+SCOPE+'.txt'),
+                             BASE/('BT_UNET_SKIPPED_'+SCOPE+'.json'),
+                             BASE/('BT_UNET_DATASET_PREFLIGHT_'+SCOPE+'.json')]:
                 if filename.exists():
                     z.write(filename,arcname=filename.name,compress_type=zipfile.ZIP_DEFLATED)
             for archive in archives:
@@ -740,12 +818,20 @@ def bundle_session(status):
 
 
 def _save_queue(status):
+    # Backward-compatible with older callers that supplied only a contiguous
+    # completed_ids list. Production AUTO runs always supply explicit numbers.
+    if 'completed_numbers' not in status:
+        first_number=START_INDEX+1
+        n=status['next_index']-START_INDEX
+        status['completed_numbers']=(list(range(first_number,status['next_index']+1))
+                                     if n==len(status.get('completed_ids',[])) else [])
     SESSION_LOG.parent.mkdir(parents=True,exist_ok=True)
     status['session_elapsed_seconds']=round(time.monotonic()-START,1)
     status['remaining_seconds']=round(remaining(),1)
     status['next_start_index']=status['next_index']  # legacy zero-based
     status['next_experiment_number']=status['next_index']+1  # user-facing one-based
-    status['last_completed_experiment_number']=status['next_index']
+    status['last_completed_experiment_number']=max(status.get('completed_numbers',[]) or [0])
+    status['last_processed_experiment_number']=status['next_index']
     status['plan_sha256']=QUEUE_SHA256
     tmp=SESSION_LOG.with_suffix('.tmp')
     tmp.write_text(json.dumps(status,ensure_ascii=False,indent=2,default=str)+'\n')
@@ -753,14 +839,21 @@ def _save_queue(status):
     (BASE/('BT_UNET_NEXT_'+SCOPE+'.json')).write_text(json.dumps({
        'scope':SCOPE,'next_start_index':status['next_index'],
        'next_experiment_number':status['next_index']+1,
-       'last_completed_experiment_number':status['next_index'],
+       'last_completed_experiment_number':max(status.get('completed_numbers',[]) or [0]),
+       'last_processed_experiment_number':status['next_index'],
+       'successful_count_this_session':len(status.get('completed_ids',[])),
+       'skipped_count_this_session':len(status.get('skipped_jobs',[])),
        'total_experiments':len(QUEUE),
        'plan_sha256':QUEUE_SHA256,
        'completed_in_this_session':status['completed_ids'],
-       'note':'Use NEXT_START_INDEX for next independent Kaggle session. Keep prior result ZIPs.'
+       'note':'Use next_experiment_number in the next independent Kaggle session; skipped jobs are NOT completed.'
     },indent=2)+'\n')
     (BASE/('BT_UNET_NEXT_EXPERIMENT_'+SCOPE+'.txt')).write_text(
         str(status['next_index']+1)+'\n',encoding='utf-8')
+    if SCOPE=='AUTO':
+        (BASE/'BT_UNET_SKIPPED_AUTO.json').write_text(json.dumps(
+            {'plan_sha256':QUEUE_SHA256,'skipped_jobs':status.get('skipped_jobs',[])},
+            ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
 
 def run_multi_session():
     global SOURCE_META, ARCHIVE
@@ -775,13 +868,15 @@ def run_multi_session():
     if START_INDEX == len(QUEUE):
         print('[COMPLETE QUEUE] All planned jobs already indexed; nothing to train.')
         status={'scope':SCOPE,'start_index':START_INDEX,'next_index':START_INDEX,
-                'total_jobs':len(QUEUE),'completed_ids':[], 'failed_jobs':[],
+                'total_jobs':len(QUEUE),'completed_ids':[], 'completed_numbers':[],
+                'skipped_jobs':[], 'failed_jobs':[],
                 'stop_reason':'all_jobs_completed', 'git_commit':None,'session_archives':[]}
         _save_queue(status)
         return
     SESSION.mkdir(parents=True,exist_ok=True)
     status={'scope':SCOPE,'start_index':START_INDEX,'next_index':START_INDEX,
-       'total_jobs':len(QUEUE),'completed_ids':[],'failed_jobs':[],
+       'total_jobs':len(QUEUE),'completed_ids':[],'completed_numbers':[],
+       'skipped_jobs':[],'failed_jobs':[],
        'stop_reason':None,'git_commit':None,'session_archives':[]}
     _activate(QUEUE[START_INDEX])
     # Set up the code exactly once for every grouped Kaggle session.
@@ -792,6 +887,7 @@ def run_multi_session():
             'source_code_hashes','torch','cuda','gpu') if k in RUN_META}
         status['git_commit']=SOURCE_META.get('git_commit')
         print('[SHARED REPO AND DEPENDENCIES READY]')
+        preflight_auto_datasets()
     except BaseException as exc:
         status['stop_reason']='shared_setup_failed: '+str(exc)
         _save_queue(status)
@@ -804,6 +900,9 @@ def run_multi_session():
     for index in range(START_INDEX,len(QUEUE)):
         spec=QUEUE[index]
         _activate(spec)
+        if SCOPE=='AUTO' and _auto_needs(spec).intersection(AUTO_UNAVAILABLE):
+            _auto_skip(status,index,spec)
+            continue
         print('\n'+'='*70,flush=True)
         print(f'[EXPERIMENT {index+1}/{len(QUEUE)}] {spec["id"]}',flush=True)
         print(f'[COUNTER] completed_global={index} next_experiment={index+1}',flush=True)
@@ -823,7 +922,18 @@ def run_multi_session():
                 raise RuntimeError('DISK_LOW: completed job ZIPs exceed 8GiB; '
                                    'bundle/download this session before more jobs')
             baseline_gate()
-            setup_datasets()
+            if SCOPE=='AUTO':
+                try:
+                    setup_datasets()
+                except (RuntimeError,FileNotFoundError,ValueError) as data_error:
+                    # This is a dataset acquisition/parsing problem, NOT a
+                    # completed experiment. Do not retry the same dead URL 80x.
+                    for name in sorted(_auto_needs(spec)-PREPARED):
+                        AUTO_UNAVAILABLE[name]='dataset preparation failed: '+str(data_error)
+                    _auto_skip(status,index,spec)
+                    continue
+            else:
+                setup_datasets()
             train,ckpt,evals,config,config_path=make_job()
             _preflight(train,config,ckpt,evals)
             RUN_META['status']='training'
@@ -849,6 +959,7 @@ def run_multi_session():
             # Outputs are safely preserved in the verified ZIP; release unpacked run data.
             shutil.rmtree(RESULTS,ignore_errors=True)
             status['completed_ids'].append(spec['id'])
+            status.setdefault('completed_numbers',[]).append(index+1)
             status['session_archives'].append(str(ARCHIVE))
             status['next_index']=index+1
             status['stop_reason']='more_jobs_remaining'
@@ -879,7 +990,7 @@ def run_multi_session():
         finally:
             _save_queue(status)
     if status['next_index'] == len(QUEUE):
-        status['stop_reason']='all_jobs_completed'
+        status['stop_reason']='queue_processed_with_skips' if status.get('skipped_jobs') else 'all_jobs_completed'
     _save_queue(status)
     if args.bundle_session:
         try:
@@ -895,7 +1006,9 @@ def run_multi_session():
         print('[SCRATCH CLEANUP] Removed transient datasets/job working directories',flush=True)
     print('\n'+'='*75)
     print('SCOPE',SCOPE,'COMPLETED THIS SESSION',len(status['completed_ids']))
-    print('LAST_COMPLETED EXPERIMENT NUMBER =',status['next_index'])
+    print('LAST SUCCESSFUL EXPERIMENT NUMBER =',max(status.get('completed_numbers',[]) or [0]))
+    print('LAST PROCESSED EXPERIMENT NUMBER =',status['next_index'])
+    print('AUTO DATASET SKIPPED JOBS =',len(status.get('skipped_jobs',[])))
     print('NEXT_EXPERIMENT =',status['next_index']+1)
     print('LEGACY NEXT_START_INDEX =',status['next_index'])
     print('REMAINING PLANNED JOBS =',len(QUEUE)-status['next_index'])
@@ -904,6 +1017,10 @@ def run_multi_session():
     print('RESULTS: each BT_UNET_RESULTS__*.zip in /kaggle/working')
     print('STOP REASON:',status['stop_reason'])
     print('='*75,flush=True)
+    # A real setup/training failure must not masquerade as a successful Kaggle
+    # cell. Budget deferrals are expected and still exit successfully.
+    if (status.get('stop_reason') or '').startswith(('blocked_or_failed:', 'shared_setup_failed:')):
+        raise SystemExit(1)
 
 if __name__=='__main__':
     run_multi_session()

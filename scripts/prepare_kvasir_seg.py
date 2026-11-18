@@ -319,14 +319,27 @@ def _maybe_download(url: str, dst: Path, *, verify: bool = True) -> Path:
     temporary = dst.with_suffix(dst.suffix + ".part")
     temporary.unlink(missing_ok=True)
     headers = {"User-Agent": "DT-unet-dataset-downloader/1.0"}
+    # On some Kaggle images, the institutional download host's certificate chain
+    # is not recognized. Retry WITHOUT TLS verification only on that specific
+    # certificate error, and only for the explicitly allowlisted Simula host.
+    # Ordinary HTTPS verification remains the first choice.
+    from urllib.parse import urlsplit
+    host = (urlsplit(url).hostname or "").lower()
+    ssl_fallback = (
+        verify
+        and host == "datasets.simula.no"
+        and os.environ.get("BT_AUTO_DATASET_TLS_FALLBACK", "").strip().lower()
+        in {"1", "true", "yes"}
+    )
     last_error: Optional[Exception] = None
+    tls_verified = verify
     for attempt in range(1, 4):
         try:
             with requests.get(
                 url,
                 stream=True,
                 timeout=(30, 300),
-                verify=verify,
+                verify=tls_verified,
                 allow_redirects=True,
                 headers=headers,
             ) as response:
@@ -337,6 +350,21 @@ def _maybe_download(url: str, dst: Path, *, verify: bool = True) -> Path:
                             f.write(chunk)
             temporary.replace(dst)
             return dst
+        except requests.exceptions.SSLError as exc:
+            last_error = exc
+            temporary.unlink(missing_ok=True)
+            if ssl_fallback and tls_verified:
+                tls_verified = False
+                print(
+                    "[SSL WARNING] Certificate verification failed for official Simula "
+                    "dataset download. Retrying with TLS verification disabled "
+                    "for this archive only. This carries an interception risk.",
+                    file=sys.stderr, flush=True,
+                )
+                continue
+            if attempt == 3:
+                break
+            print(f"[WARN] SSL error on attempt {attempt}/3: {exc}", file=sys.stderr)
         except Exception as exc:
             last_error = exc
             temporary.unlink(missing_ok=True)

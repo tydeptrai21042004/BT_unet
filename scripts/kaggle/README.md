@@ -27,10 +27,10 @@ The runner no longer invokes `kagglehub.dataset_download()` for missing Kvasir-S
 
 ## AUTO dataset-only queue (no manual Kaggle dataset attachment)
 
-The new `--scope AUTO` selects **153 experiments** needing only public direct
+The new `--scope AUTO` selects **165 experiments** needing only public direct
 HTTPS dataset downloads. Use `BT_UNet_KAGGLE_11H_AUTO.ipynb` and
-`docs/KAGGLE_AUTO_ONLY_GUIDE.md`. It skips optional expensive dataset audits
-but still requires dataset preparation and a valid evaluation checkpoint.
+`docs/KAGGLE_AUTO_PREFLIGHT_AND_SKIP_GUIDE.md`. It skips optional expensive dataset audits
+and probes public ZIP headers on Kaggle before training. Dataset acquisition failures are explicitly SKIPPED (never counted as completed); the new 12 BUS-UCLM ultrasound jobs are included. See skip/progress JSON for details.
 
 ```bash
 python scripts/kaggle/multi_t4_runner.py --scope AUTO --one-based --start-index 1 --max-hours 11 --bundle-session
