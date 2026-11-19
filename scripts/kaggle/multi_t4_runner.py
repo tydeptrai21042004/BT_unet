@@ -503,7 +503,7 @@ def make_job():
         job=selected[0]
         config_path=Path(job['config_path']);config_path.parent.mkdir(parents=True,exist_ok=True)
         config_path.write_text(yaml.safe_dump(job['config'],sort_keys=False),encoding='utf-8')
-        return job['train_command'],Path(job['checkpoint']),[('test',job['eval_command'])],job['config'],config_path
+        return job['train_command'],Path(job['checkpoint']),[(SPEC['dataset'],job['eval_command'])],job['config'],config_path
     src=REPO/SPEC['config']
     if not src.is_file():raise FileNotFoundError('Missing actual model config: '+str(src))
     cfg=yaml.safe_load(src.read_text())
@@ -1047,7 +1047,13 @@ def run_multi_session():
             bundle_session(status)
         except Exception as err:
             print('[SESSION BUNDLE FAILED; per-job ZIPs preserved]',repr(err),flush=True)
-    if not args.keep_scratch:
+    # A failed job may already have finished hours of training and evaluation.
+    # Keep its checkpoint and per-image metrics for repair/re-export instead of
+    # irreversibly deleting them. Successful sessions retain compact cleanup.
+    failed = (status.get('stop_reason') or '').startswith(('blocked_or_failed:', 'shared_setup_failed:'))
+    if failed:
+        print('[RECOVERY] Failure detected; preserving unarchived scratch, checkpoints, and evaluation summaries.', flush=True)
+    if not args.keep_scratch and not failed:
         # Kaggle saves /kaggle/working as notebook output: remove data and temporary
         # full checkpoints after verified job archives were created.
         shutil.rmtree(SESSION_DATA,ignore_errors=True)

@@ -53,6 +53,32 @@ def test_export_and_complete_only_csv(tmp_path):
     assert not list(folder.rglob('*.pt'))
 
 
+def test_all_revision_auto_targets_use_real_dataset_labels(tmp_path, monkeypatch):
+    """Regression: evaluator output dataset must match its export label.
+
+    Previously make_job() labeled revision output as 'test' even though
+    summary.json correctly identified dataset='kvasir_seg'. After a completed
+    100-epoch run, the exporter rejected the mismatch and lost the session.
+    """
+    runner_script = ROOT / 'scripts/kaggle/multi_t4_runner.py'
+    monkeypatch.setattr(sys, 'argv', ['multi_t4_runner.py', '--scope', 'AUTO',
+                                    '--one-based', '--start-index', '1', '--plan-only'])
+    monkeypatch.setenv('BT_KAGGLE_WORKDIR', str(tmp_path))
+    module_spec = importlib.util.spec_from_file_location('revision_target_runner', runner_script)
+    runner = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(runner)
+    revisions = [job for job in runner.QUEUE if job['type'] == 'revision']
+    assert len(revisions) == 57
+    for job in revisions:
+        runner._activate(job)
+        _, _, evaluations, _, _ = runner.make_job()
+        assert len(evaluations) == 1
+        label, command = evaluations[0]
+        assert label == job['dataset'], job['id']
+        assert command[command.index('--dataset') + 1] == label
+        assert command[command.index('--split') + 1] == 'test'
+
+
 def test_incomplete_loss_is_not_claimed_complete(tmp_path):
     from scripts.kaggle.results_export import export_completed
     spec={'id':'one','dataset':'kvasir_seg','model':'unet','seed':42,'epochs':100}
