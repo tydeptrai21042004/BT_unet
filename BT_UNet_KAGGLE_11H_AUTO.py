@@ -1,4 +1,4 @@
-"""Kaggle 11h AUTO queue: only datasets downloadable by direct HTTPS.
+"""Kaggle 12h AUTO queue with automatic same-dataset recovery.
 
 Upload this notebook on Kaggle, enable Internet/GPU, and edit FIRST_EXPERIMENT
 between Kaggle sessions. Requires pushing the full updated ZIP into GitHub first.
@@ -10,12 +10,14 @@ from pathlib import Path
 # EDIT ONLY FIRST_EXPERIMENT when starting the next independent Kaggle session.
 REPO_URL = 'https://github.com/tydeptrai21042004/BT_unet.git'
 FIRST_EXPERIMENT = 1
+LAST_EXPERIMENT = 165  # Inclusive; use 12, 93, or 105 for targeted recovery.
 PINNED_COMMIT = ''  # Pin the NEW SHA after pushing the updated code; the previous SHA runs old behavior.
-SESSION_HOURS = 11.0
+SESSION_HOURS = 12.0
 TOTAL_EXPERIMENTS = 165
 
 assert 1 <= FIRST_EXPERIMENT <= TOTAL_EXPERIMENTS + 1
-assert 0.25 <= SESSION_HOURS <= 11
+assert FIRST_EXPERIMENT <= LAST_EXPERIMENT + 1 <= TOTAL_EXPERIMENTS + 1
+assert 0.25 <= SESSION_HOURS <= 12
 started = time.monotonic()
 work = Path('/kaggle/working') if Path('/kaggle/working').is_dir() else Path.cwd()
 checkout = work/'BT_unet_github_checkout'
@@ -32,7 +34,7 @@ if checkout.exists():
     if remote.rstrip('/').lower() != REPO_URL.rstrip('/').lower():
         raise RuntimeError('Checkout remote differs; refusing to remove non-runner files')
     shutil.rmtree(checkout)
-print(f'[AUTO DATASETS] Direct HTTPS only | {TOTAL_EXPERIMENTS} independent experiments',flush=True)
+print(f'[AUTO DATASETS] Automatic Kaggle/Hugging Face/HTTPS sources | {TOTAL_EXPERIMENTS} independent experiments',flush=True)
 print(f'[START] #{FIRST_EXPERIMENT}/{TOTAL_EXPERIMENTS} | budget {SESSION_HOURS}h',flush=True)
 subprocess.run(['git','clone',REPO_URL,str(checkout)],check=True)
 if PINNED_COMMIT:
@@ -44,14 +46,14 @@ runner=checkout/'scripts/kaggle/multi_t4_runner.py'
 if not runner.is_file():
     raise FileNotFoundError('Kaggle runner missing from GitHub. Push the updated FULL ZIP first.')
 source=runner.read_text(encoding='utf-8')
-if "'AUTO':165" not in source or 'PAPER_METRICS_COMPACT_V2' not in source:
+if "'AUTO':165" not in source or 'epoch_recovery_no_cold_start_calibration' not in source:
     raise RuntimeError('GitHub has the old scheduler/exporter. Push the updated FULL ZIP to GitHub before running.')
 os.environ['BT_T4_MONOTONIC_START']=str(started)
 os.environ['BT_KAGGLE_WORKDIR']=str(work)
 if PINNED_COMMIT: os.environ['BT_UNET_COMMIT']=PINNED_COMMIT
 cmd=[sys.executable,str(runner),'--scope','AUTO','--one-based',
      '--start-index',str(FIRST_EXPERIMENT),'--max-hours',str(SESSION_HOURS),
-     '--bundle-session']
+     '--bundle-session','--end-experiment',str(LAST_EXPERIMENT)]
 completed=subprocess.run(cmd,cwd=str(checkout),check=False)
 if next_file.is_file():
     print('[NEXT SESSION FIRST_EXPERIMENT =]',next_file.read_text().strip())
@@ -65,12 +67,13 @@ for label in ('BT_UNET_PAPER_RESULTS_AUTO.csv', 'BT_UNET_COMPLETED_RESULTS_AUTO.
     if candidate.exists():
         print('[PAPER-READY OUTPUT]',candidate, f'{candidate.stat().st_size} bytes')
 print('[NOTE] AUTO ZIPs contain evaluation metrics, per-image CSV and training histories; no weights/images.')
+print('[RECOVERY CHECKPOINTS — retain or attach as Kaggle input in next session]', *map(str, (work/'BT_UNET_RECOVERY').glob('*.pt')))
 print('[SCHEDULER EXIT CODE]',completed.returncode)
 report=work/'BT_UNET_DATASET_PREFLIGHT_AUTO.json'
 if report.is_file():
     import json
     checked=json.loads(report.read_text()).get('datasets',{})
-    print('[DATASET PREFLIGHT]',{name:('READY' if item.get('available') else 'UNAVAILABLE')
+    print('[DATASET PREFLIGHT]',{name:('NOT PROBED' if item.get('available') is None else 'READY' if item.get('available') else 'UNAVAILABLE')
           for name,item in checked.items()})
 skipped=work/'BT_UNET_SKIPPED_AUTO.json'
 if skipped.is_file():

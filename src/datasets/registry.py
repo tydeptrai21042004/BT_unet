@@ -88,9 +88,6 @@ DATASET_SPECS = {
             "breast-ultrasound-uclm",
         ),
         canonical_dir="BUS-UCLM",
-        official_download_urls=(
-            "https://prod-dcd-datasets-cache-zipfiles.s3.eu-west-1.amazonaws.com/7fvgj4jsp7-1.zip",
-        ),
         official_source_url="https://data.mendeley.com/datasets/7fvgj4jsp7/3",
         description=(
             "BUS-UCLM breast ultrasound lesion segmentation dataset. "

@@ -18,7 +18,7 @@ from pathlib import Path
 REPO_URL = "https://github.com/tydeptrai21042004/BT_unet.git"
 FIRST_EXPERIMENT = 1            # Next session: paste NEXT_EXPERIMENT from previous output.
 PINNED_COMMIT = ""              # Recommended: paste the full SHA printed on session #1.
-SESSION_HOURS = 11.0           # Includes git clone, dependencies, data, experiments, ZIP.
+SESSION_HOURS = 12.0           # Includes git clone, dependencies, data, experiments, ZIP.
 
 # Data source priority: existing attached Input -> official HTTPS download ->
 # authenticated Kaggle CLI. Non-interactive kagglehub attachment is NOT used.
@@ -43,8 +43,8 @@ print(f'[BEGIN] Experiment #{FIRST_EXPERIMENT} / 261',flush=True)
 print(f'[SESSION BUDGET] {SESSION_HOURS:.2f} hours total',flush=True)
 if not isinstance(FIRST_EXPERIMENT,int) or not 1<=FIRST_EXPERIMENT<=262:
     raise ValueError('FIRST_EXPERIMENT must be 1..261, or 262 when everything is already done')
-if not 0.25<=SESSION_HOURS<=11.0:
-    raise ValueError('SESSION_HOURS must be in [0.25,11]')
+if not 0.25<=SESSION_HOURS<=12.0:
+    raise ValueError('SESSION_HOURS must be in [0.25,12]')
 
 # Prevent accidental duplicates when a user reruns the same cell after some
 # successful experiments. After a failed first job, the stored counter remains 1.

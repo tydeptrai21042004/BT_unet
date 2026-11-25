@@ -172,7 +172,7 @@ def test_compact_auto_session_zip(tmp_path,monkeypatch):
     assert all_rows[1]['loss']=='---'
 
 
-def test_budget_uses_realistic_epochs_and_next_seed_timing(tmp_path,monkeypatch):
+def test_auto_budget_allows_epoch_recovery_instead_of_permanent_deferral(tmp_path,monkeypatch):
     runner_script=ROOT/'scripts/kaggle/multi_t4_runner.py'
     monkeypatch.setattr(sys,'argv',['multi_t4_runner.py','--scope','AUTO','--one-based',
                                    '--start-index','2','--bundle-session'])
@@ -185,7 +185,9 @@ def test_budget_uses_realistic_epochs_and_next_seed_timing(tmp_path,monkeypatch)
     r.CALIBRATION_CACHE[key]=130.0
     r._activate(r.QUEUE[1])
     monkeypatch.setattr(r,'remaining',lambda:7.56*3600)
-    assert r._preflight([],base,None,[('test',[])]) < 4.*3600
+    assert r._preflight([],base,None,[('test',[])]) is None
+    assert r.RUN_META['time_policy']=='epoch_recovery_no_cold_start_calibration'
     r.CALIBRATION_CACHE[key]=121.3
     monkeypatch.setattr(r,'remaining',lambda:4.1*3600)
-    assert r._preflight([],base,None,[('test',[])]) < 3.7*3600
+    assert r._preflight([],base,None,[('test',[])]) is None
+    assert r.args.max_hours==12.0

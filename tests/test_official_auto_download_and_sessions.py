@@ -38,8 +38,8 @@ def test_prepare_main_auto_downloads_kvasir_instrument(monkeypatch, tmp_path: Pa
     Image.new("RGB", (8, 8), color=(1, 2, 3)).save(images / "tool.jpg")
     Image.new("L", (8, 8), color=255).save(masks / "tool.png")
 
-    monkeypatch.setattr(prepare_kvasir_seg, "_maybe_download", lambda *a, **k: tmp_path / "instrument.zip")
-    monkeypatch.setattr(prepare_kvasir_seg, "_extract_zip", lambda *a, **k: extracted)
+    from scripts.kaggle import auto_acquire
+    monkeypatch.setattr(auto_acquire, "acquire", lambda *a, **k: {"path": str(extracted)})
     data_root = tmp_path / "data"
     monkeypatch.setattr(prepare_kvasir_seg, "parse_args", lambda: Namespace(
         dataset="kvasir_instrument", data_root=str(data_root), source_dir=None,

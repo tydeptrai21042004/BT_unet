@@ -33,7 +33,7 @@ def test_bus_uclm_registry_has_official_doi_source():
     spec = get_dataset_spec("breast-ultrasound-uclm")
     assert spec.name == "bus_uclm"
     assert spec.official_source_url == "https://data.mendeley.com/datasets/7fvgj4jsp7/3"
-    assert spec.official_download_urls
+    assert not spec.official_download_urls  # dead V1 S3 URL removed; automatic mirrors used
     assert "10.17632/7fvgj4jsp7.3" in spec.description
 
 
@@ -103,20 +103,18 @@ def test_prepare_bus_uclm_from_source_dir_binarizes_color_masks(tmp_path: Path, 
     assert set(np.asarray(Image.open(mask_dir / "case_normal.png")).reshape(-1).tolist()) == {0}
 
 
-def test_prepare_main_uses_bus_uclm_official_download(monkeypatch, tmp_path: Path):
+def test_prepare_main_uses_bus_uclm_automatic_download(monkeypatch, tmp_path: Path):
     extracted = tmp_path / "official_extract" / "BUS-UCLM"
     _write_bus_uclm_pair(extracted, "case_red", (255, 0, 0))
     data_root = tmp_path / "data"
 
     called = {}
 
-    def fake_download_official_archives(urls, downloads_dir, extract_dir, dataset_name, *, verify=True):
-        called["urls"] = tuple(urls)
+    from scripts.kaggle import auto_acquire
+    def fake_acquire(dataset_name, cache):
         called["dataset_name"] = dataset_name
-        called["verify"] = verify
-        return extracted
-
-    monkeypatch.setattr(prepare_kvasir_seg, "_download_official_archives", fake_download_official_archives)
+        return {"path": str(extracted)}
+    monkeypatch.setattr(auto_acquire, "acquire", fake_acquire)
     monkeypatch.setattr(
         prepare_kvasir_seg,
         "parse_args",
@@ -136,5 +134,4 @@ def test_prepare_main_uses_bus_uclm_official_download(monkeypatch, tmp_path: Pat
     prepare_kvasir_seg.main()
 
     assert called["dataset_name"] == "bus_uclm"
-    assert called["urls"] == get_dataset_spec("bus_uclm").official_download_urls
     assert (data_root / "processed" / "bus_uclm" / "images_16" / "case_red.png").is_file()

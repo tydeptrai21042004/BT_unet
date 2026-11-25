@@ -469,6 +469,9 @@ def main() -> None:
             print(f"Downloading {dataset_name} from explicit URL: {explicit_download_url}")
             zip_path = _maybe_download(explicit_download_url, download_dst, verify=not allow_insecure)
             dataset_root = _extract_zip(zip_path, data_root / "_tmp_extract" / dataset_name, dataset_name)
+        elif dataset_name in {"kvasir_instrument", "bus_uclm"}:
+            from scripts.kaggle.auto_acquire import acquire
+            dataset_root = Path(acquire(dataset_name, data_root / "automatic_sources")["path"])
         elif spec.official_download_urls:
             print(f"Downloading {dataset_name} from its official dataset source.")
             if spec.official_source_url:

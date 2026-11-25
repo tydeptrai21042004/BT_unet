@@ -27,6 +27,7 @@ from src.datasets.registry import get_dataset_spec
 # Same-dataset mirror operated by the dataset's original institution.
 # Don't substitute unrelated datasets, processed derivatives or synthetic data.
 OFFICIAL_MIRRORS = {
+    'kvasir_instrument': ('https://huggingface.co/datasets/medicalai/MedSegDB/resolve/main/Kvasir_Instrument.zip',),
     'hyper_kvasir_seg': (
         'https://huggingface.co/datasets/SimulaMet-HOST/HyperKvasir/resolve/main/hyper-kvasir-segmented-images.zip',
     ),
@@ -106,7 +107,7 @@ def check_sources(datasets=AUTO_DATASETS, *, max_total_seconds=110, probe=probe_
                 errors.append(f'{url} :: {error}')
                 print('[PREFLIGHT UNAVAILABLE]',dataset,str(error)[:180],flush=True)
         result[dataset] = {
-            'available': selected is not None,
+            'available': selected is not None if candidate_urls(dataset) else None,
             'selected': selected,
             'attempted_urls': list(candidate_urls(dataset)),
             'errors': errors,
@@ -126,7 +127,7 @@ def main():
     ns.output.parent.mkdir(parents=True,exist_ok=True)
     ns.output.write_text(json.dumps(result,indent=2)+'\n',encoding='utf-8')
     print('[AUTO PREFLIGHT SUMMARY]',
-          {k:('OK' if v['available'] else 'SKIP') for k,v in result['datasets'].items()},flush=True)
+          {k:('SDK acquisition' if v['available'] is None else 'OK' if v['available'] else 'probe failed; acquisition may still succeed') for k,v in result['datasets'].items()},flush=True)
     # Unavailable data is not a program failure. The runner will skip all related
     # experiments and retain their IDs in the skipped-jobs manifest.
     return 0

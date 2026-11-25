@@ -15,15 +15,16 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(description='Run BT_unet experiment queue under a Kaggle 12h T4 budget')
 parser.add_argument('--scope', choices=['ALL','CORE','OPTIONAL','AUTO'], default='ALL',
-    help='AUTO runs only jobs whose required datasets have public direct HTTPS ZIP URLs; independent 1-based queue')
+    help='AUTO runs the fixed queue with automatic same-dataset source recovery; independent 1-based queue')
 parser.add_argument('--start-index', type=int, default=None,
     help='Experiment number (1-based when --one-based; else legacy 0-based index)')
 parser.add_argument('--one-based', action='store_true',
     help='Use human-readable experiment numbers: first experiment is 1')
+parser.add_argument('--end-experiment',type=int,default=None,help='Optional inclusive 1-based last experiment for this session')
 parser.add_argument('--bundle-session', action='store_true',
     help='Also make a single ZIP containing every completed independent job ZIP from this session')
-parser.add_argument('--max-hours', type=float, default=11.0,
-    help='Maximum notebook wall-clock budget, including setup and packaging (default: 11)')
+parser.add_argument('--max-hours', type=float, default=12.0,
+    help='Maximum notebook wall-clock budget, including setup and packaging (default: 12)')
 parser.add_argument('--keep-job-zips', action='store_true',
     help='Keep loose job ZIPs after a verified session ZIP (doubles saved storage)')
 parser.add_argument('--keep-scratch', action='store_true',
@@ -50,8 +51,8 @@ if str(REPO_ROOT) not in sys.path:
 START = float(os.environ.get('BT_T4_MONOTONIC_START', time.monotonic()))
 if START > time.monotonic() + 1 or START < time.monotonic() - 24*3600:
     raise ValueError('Invalid BT_T4_MONOTONIC_START')
-if not 0.25 <= args.max_hours <= 11.0:
-    parser.error('--max-hours must be between 0.25 and 11.0')
+if not 0.25 <= args.max_hours <= 12.0:
+    parser.error('--max-hours must be between 0.25 and 12.0')
 DEADLINE = START + args.max_hours*3600
 CLEANUP_RESERVE = min(20*60, args.max_hours*3600/4)
 BASE = Path(os.environ.get('BT_KAGGLE_WORKDIR', '/kaggle/working' if Path('/kaggle/working').exists() else '/tmp/bt_kaggle_test'))
@@ -101,7 +102,7 @@ def run_cmd(cmd, *, cwd=None, max_seconds=None, name='command', env=None):
             if (time.monotonic()-t0)>limit or remaining()<=CLEANUP_RESERVE:
                 os.killpg(proc.pid,signal.SIGKILL)
                 proc.wait(timeout=30)
-                raise TimeoutError(f'{name} exceeded its time budget. See {log}. Training must be rerun; this code does not falsely claim mid-epoch resume.')
+                raise TimeoutError(f'{name} exceeded its time budget. See {log}. Completed epoch recovery checkpoints, if enabled, remain available.')
             time.sleep(2)
     tail=log.read_text(encoding='utf-8',errors='replace').splitlines()[-14:]
     for line in tail:print(' ',line[-220:],flush=True)
@@ -314,26 +315,15 @@ def _resolve_kvasir_kaggle():
 
 
 def preflight_auto_datasets():
-    """Fail fast on inaccessible public ZIP hosts, before starting GPU work.
-
-    A 4-byte HTTP probe does not establish download success. Extraction failures
-    are handled by the job loop and also recorded as SKIPPED, never COMPLETE.
-    """
+    """Describe acquisition candidates without blocking on fragile ZIP probes."""
     if SCOPE != 'AUTO':
         return
     report = BASE/'BT_UNET_DATASET_PREFLIGHT_AUTO.json'
-    run_cmd([sys.executable, 'scripts/kaggle/dataset_preflight.py',
-             '--output', str(report), '--seconds', '115'], cwd=REPO,
-            max_seconds=155, name='auto_dataset_preflight')
-    record=json.loads(report.read_text(encoding='utf-8'))
-    for dataset in sorted(AUTO_DATASETS):
-        details=record.get('datasets',{}).get(dataset, {})
-        if details.get('available') and details.get('selected',{}).get('url'):
-            AUTO_SOURCE_URLS[dataset]=details['selected']['url']
-        else:
-            AUTO_UNAVAILABLE[dataset]='preflight failed: '+ ' | '.join(details.get('errors',[]))
-    print('[AUTO PREFLIGHT] usable',sorted(AUTO_SOURCE_URLS),
-          '| skipped datasets',sorted(AUTO_UNAVAILABLE),flush=True)
+    # Network probes are advisory only; acquisition is lazy and attempts real sources.
+    from scripts.kaggle.dataset_preflight import candidate_urls
+    record={'mode':'lazy_acquisition_no_probe_gate','datasets':{d:{'available':None,'candidate_urls':list(candidate_urls(d))} for d in sorted(AUTO_DATASETS)}}
+    report.write_text(json.dumps(record,indent=2))
+    print('[AUTO] Dataset availability will be established by validated acquisition.',flush=True)
 
 
 def _auto_needs(spec):
@@ -372,24 +362,24 @@ def setup_datasets():
         args=[sys.executable,'scripts/prepare_dataset.py','--dataset',dataset,'--data-root',str(DATA),'--image-size',str(SPEC['image_size'])]
         source_path=os.getenv('BT_DATA_'+dataset.upper()+'_SOURCE')
         zip_path=os.getenv('BT_DATA_'+dataset.upper()+'_ZIP')
-        if SCOPE == 'AUTO':
-            # Let the existing preparation utility fetch the registered public HTTPS
-            # archive directly. No manual Kaggle Input, kagglehub attach, gdown,
-            # 1,000-pair audit, or slow content hashing. Its minimum parsing and
-            # train/val/test split creation are still required to actually train.
-            source_path = None
-            zip_path = None
-            from src.datasets.registry import get_dataset_spec
-            source_url = AUTO_SOURCE_URLS.get(dataset, get_dataset_spec(dataset).default_download_url)
-            if not source_url:
-                raise RuntimeError('No selected public HTTPS archive URL for '+dataset)
-            # Use the exact URL that passed the lightweight preflight, including
-            # the official institution-operated mirror when selected.
-            args += ['--download-url', source_url]
-            RUN_META.setdefault('dataset_provenance',{})[dataset] = {
-                'source':'public_https_direct_auto', 'url':source_url,
-                'probe_only_not_full_download_verification':True}
-            print('[AUTO DOWNLOAD]',dataset,source_url,flush=True)
+        if SCOPE == 'AUTO' and not (source_path or zip_path):
+            if dataset in {'bus_uclm','kvasir_instrument'}:
+                cache=SESSION_DATA/'automatic_sources'
+                run_cmd([sys.executable,'scripts/kaggle/auto_acquire.py','--dataset',dataset,'--cache',str(cache)],cwd=REPO,max_seconds=1800,name='acquire_'+dataset)
+                receipt=json.loads((cache/(dataset+'.json')).read_text())
+                args+=['--source-dir',receipt['path']]
+                RUN_META.setdefault('dataset_provenance',{})[dataset]=receipt
+            else:
+                from scripts.kaggle.dataset_preflight import candidate_urls
+                errors=[]
+                for url in candidate_urls(dataset):
+                    try:
+                        run_cmd(args+['--download-url',url,'--force'],cwd=REPO,max_seconds=900,name='prepare_'+dataset,env=dict(os.environ, BT_AUTO_DATASET_TLS_FALLBACK='1'))
+                        RUN_META.setdefault('dataset_provenance',{})[dataset]={'source':'https','url':url}
+                        break
+                    except (RuntimeError, ValueError) as e: errors.append(str(e))
+                else: raise RuntimeError('All dataset sources failed: '+' | '.join(errors))
+                args=None
         if source_path:
             args+=['--source-dir',source_path]
             RUN_META.setdefault('dataset_provenance',{})[dataset]={'source':'explicit_source_dir','path':source_path}
@@ -408,7 +398,12 @@ def setup_datasets():
         if SCOPE == 'AUTO':
             download_env=os.environ.copy()
             download_env['BT_AUTO_DATASET_TLS_FALLBACK']='1'
-        run_cmd(args,cwd=REPO,max_seconds=900 if SCOPE=='AUTO' else 3600,name='prepare_'+dataset,env=download_env)
+        if args is not None: run_cmd(args,cwd=REPO,max_seconds=1800 if SCOPE=='AUTO' else 3600,name='prepare_'+dataset,env=download_env)
+        if SCOPE=='AUTO' and dataset in {'kvasir_instrument','bus_uclm'}:
+            from scripts.kaggle.auto_acquire import EXPECTED
+            metadata=DATA/'processed'/dataset/'metadata.csv'
+            with metadata.open(newline='',encoding='utf-8') as f: count=len(list(csv.DictReader(f)))
+            if count!=EXPECTED[dataset]: raise RuntimeError(f'{dataset}: expected {EXPECTED[dataset]} pairs, got {count}')
         if dataset=='kvasir_seg' and SCOPE != 'AUTO':
             metadata=DATA/'processed'/'kvasir_seg'/'metadata.csv'
             if not metadata.is_file():
@@ -433,7 +428,7 @@ def setup_datasets():
                 shutil.copyfile(src,DATA/'splits'/dataset/(part+'.txt'))
             RUN_META.setdefault('split_protocol',{})[dataset]='user_supplied_grouped_or_official'
         else:
-            RUN_META.setdefault('split_protocol',{})[dataset]='exploratory_random_image_split_seed42'
+            RUN_META.setdefault('split_protocol',{})[dataset]=('patient_grouped_seed42_author_test_prefixes' if dataset=='bus_uclm' else ('contiguous' if dataset=='isbi2012' else 'exploratory_random_image_split_seed42'))
         if SCOPE == 'AUTO':
             # Fast track: no per-file hashes, size assertions, duplication audits,
             # or manual data-source verification. Basic dataset preparation and
@@ -716,6 +711,10 @@ def _preflight(train, config, ckpt, evaluations):
     global EVAL_AND_OUTPUT_RESERVE
     # A realistic conservative bound includes *all* test targets and optional post-hoc GPU work.
     EVAL_AND_OUTPUT_RESERVE=(240 + 120*len(evaluations) if SCOPE=='AUTO' else 600 + 1200*len(evaluations)) + (6800 if SPEC.get('posthoc') else 0)
+    if SCOPE=='AUTO':
+        hard_check(extra=EVAL_AND_OUTPUT_RESERVE+120)
+        RUN_META['time_policy']='epoch_recovery_no_cold_start_calibration'
+        return None
     key=_calibration_key(config)
     if key in CALIBRATION_CACHE:
         cost=CALIBRATION_CACHE[key]
@@ -922,7 +921,9 @@ def run_multi_session():
                 print('[WARNING] Could not bundle setup failure:',bundle_exc,flush=True)
         raise
     _save_queue(status)
-    for index in range(START_INDEX,len(QUEUE)):
+    end = min(len(QUEUE), args.end_experiment or len(QUEUE))
+    if end <= START_INDEX: raise ValueError('End experiment precedes start')
+    for index in range(START_INDEX,end):
         spec=QUEUE[index]
         _activate(spec)
         if SCOPE=='AUTO' and _auto_needs(spec).intersection(AUTO_UNAVAILABLE):
@@ -953,6 +954,7 @@ def run_multi_session():
                 except (RuntimeError,FileNotFoundError,ValueError) as data_error:
                     # This is a dataset acquisition/parsing problem, NOT a
                     # completed experiment. Do not retry the same dead URL 80x.
+                    if spec['dataset'] in {'kvasir_instrument','bus_uclm'}: raise
                     for name in sorted(_auto_needs(spec)-PREPARED):
                         AUTO_UNAVAILABLE[name]='dataset preparation failed: '+str(data_error)
                     _auto_skip(status,index,spec)
@@ -964,6 +966,14 @@ def run_multi_session():
             RUN_META['status']='training'
             # Explicit post-train evaluation/analysis/packaging time is held back.
             train_limit=max(20,remaining()-CLEANUP_RESERVE-EVAL_AND_OUTPUT_RESERVE)
+            recovery_path=None
+            if SCOPE=='AUTO':
+                recovery_path=BASE/'BT_UNET_RECOVERY'/f"{SPEC['id']}.pt"
+                if not recovery_path.exists():
+                    for candidate in Path('/kaggle/input').rglob(recovery_path.name) if Path('/kaggle/input').exists() else []:
+                        recovery_path.parent.mkdir(parents=True,exist_ok=True)
+                        shutil.copy2(candidate,recovery_path); break
+                train += ['--recovery-path',str(recovery_path)]
             actual_train_seconds=run_cmd(train,cwd=REPO,max_seconds=train_limit,name='train_full')
             RUN_META['actual_train_seconds']=round(actual_train_seconds,2)
             if SCOPE=='AUTO':
@@ -1001,6 +1011,7 @@ def run_multi_session():
                 package_all()
                 archive_path=ARCHIVE
             # Only verified summaries remain. The next job reuses shared datasets.
+            if recovery_path is not None: recovery_path.unlink(missing_ok=True)
             shutil.rmtree(RESULTS,ignore_errors=True)
             status['completed_ids'].append(spec['id'])
             status.setdefault('completed_numbers',[]).append(index+1)
@@ -1016,7 +1027,7 @@ def run_multi_session():
                 break
         except BaseException as exc:
             reason=str(exc)
-            if ('PROJECTED_OVER_BUDGET' in reason or 'DISK_LOW' in reason or isinstance(exc,TimeoutError) and RUN_META.get('status')=='initialized'):
+            if (isinstance(exc,TimeoutError) and SCOPE=='AUTO' or 'PROJECTED_OVER_BUDGET' in reason or 'DISK_LOW' in reason or isinstance(exc,TimeoutError) and RUN_META.get('status')=='initialized'):
                 status['stop_reason']='deferred_for_next_session: '+reason
                 print('[DEFERRED] No experiment settings changed:',reason,flush=True)
             else:
@@ -1032,10 +1043,11 @@ def run_multi_session():
                     except Exception as package_exc:
                         print('[FAILED TO ARCHIVE LOGS]',package_exc)
                 else:
-                    print('[FAILED JOB] No unverified metrics or heavy checkpoint ZIP exported.',flush=True)
+                    print('[FAILED JOB] No unverified metrics exported; recovery checkpoint retained if available.',flush=True)
             break
         finally:
             _save_queue(status)
+    if status['next_index'] == end and end < len(QUEUE): status['stop_reason']='requested_interval_completed'
     if status['next_index'] == len(QUEUE):
         status['stop_reason']='queue_processed_with_skips' if status.get('skipped_jobs') else 'all_jobs_completed'
     _save_queue(status)

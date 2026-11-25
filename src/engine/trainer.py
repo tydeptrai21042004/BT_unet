@@ -241,10 +241,20 @@ class Trainer:
         metric_for_plateau: str = "loss",
         monitor: str = "dice",
         monitor_mode: str = "max",
+        recovery_path=None,
+        recovery_identity=None,
     ) -> list[Dict[str, float]]:
         history: list[Dict[str, float]] = []
         best_value: Optional[float] = None
-        for epoch in range(1, epochs + 1):
+        import time
+        from pathlib import Path
+        from . import recovery
+        if recovery_path and Path(recovery_path).is_file():
+            history, best_value = recovery.load(recovery_path, self, recovery_identity)
+            self._log(f"Recovered completed epochs: {len(history)}/{epochs}")
+        if len(history) > epochs: raise ValueError("Checkpoint exceeds configured epoch count")
+        for epoch in range(len(history) + 1, epochs + 1):
+            epoch_start = time.monotonic()
             train_metrics = self.train_one_epoch(train_loader, epoch)
             record: Dict[str, float] = {f"train/{k}": v for k, v in train_metrics.items()}
 
@@ -265,6 +275,9 @@ class Trainer:
                 best_value = value
                 self._snapshot_best(record, epoch)
             history.append(record)
+            if recovery_path:
+                recovery.save(recovery_path, self, history, best_value, recovery_identity)
+            print(f"[EPOCH_SECONDS] {epoch} {time.monotonic()-epoch_start:.3f}", flush=True)
         return history
 
 

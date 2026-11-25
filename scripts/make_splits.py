@@ -97,7 +97,21 @@ def main() -> None:
     if len(ids) < 3:
         raise RuntimeError(f"Need at least 3 samples to create train/val/test splits, found {len(ids)}")
 
-    train_ids, val_ids, test_ids = _split_ids(
+    if dataset_name == "bus_uclm":
+        groups = sorted({sid.split("_")[0] for sid in ids})
+        if len(groups) != 38:
+            raise ValueError(f"BUS-UCLM requires 38 patient groups; found {len(groups)}")
+        # Follow the authors' suggested five test patients; validation is grouped too.
+        test_groups = {"cope", "anfo", "elco", "crci", "flka"}
+        if not test_groups.issubset(groups): raise ValueError("Missing BUS-UCLM test patient identifiers")
+        development = sorted(set(groups)-test_groups)
+        random.Random(args.seed).shuffle(development)
+        val_groups = set(development[:4])
+        train_ids = [sid for sid in ids if sid.split("_")[0] not in test_groups | val_groups]
+        val_ids = [sid for sid in ids if sid.split("_")[0] in val_groups]
+        test_ids = [sid for sid in ids if sid.split("_")[0] in test_groups]
+    else:
+        train_ids, val_ids, test_ids = _split_ids(
         ids,
         args.train_ratio,
         args.val_ratio,

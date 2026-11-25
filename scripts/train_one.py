@@ -50,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", type=str, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--recovery-path", type=str, default=None, help="Atomic epoch checkpoint; restore full state if present.")
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--train-datasets", type=str, default=None,
                         help="Comma-separated source datasets; loads only their train manifests.")
@@ -350,6 +351,19 @@ def main() -> None:
         model.load_state_dict(unwrap_state_dict(checkpoint), strict=True)
         logger.info(f"Resumed from checkpoint: {args.resume}")
 
+    from src.engine.recovery import signature
+    if args.recovery_path:
+        # Prepared PNG content, not absolute paths, determines recovery compatibility.
+        digest = hashlib.sha256()
+        for dataset in sorted(set(dataset_names + [cfg["data"].get("val_dataset", dataset_names[0])])):
+            folder = data_root / "processed" / dataset
+            for directory in (f"images_{cfg['data']['image_size']}", f"masks_{cfg['data']['image_size']}"):
+                for path in sorted((folder / directory).glob("*.png")):
+                    digest.update((dataset + "/" + directory + "/" + path.name).encode())
+                    digest.update(hashlib.sha256(path.read_bytes()).digest())
+        split_records.append({"dataset":"prepared_content","split":"all","sha256":digest.hexdigest()})
+    if args.resume and args.recovery_path:
+        raise ValueError("Use either weights-only --resume or full --recovery-path, not both")
     history = trainer.fit(
         train_loader=train_loader,
         val_loader=val_loader,
@@ -357,6 +371,8 @@ def main() -> None:
         metric_for_plateau=str(cfg["train"].get("plateau_metric", "loss")),
         monitor=str(cfg["train"].get("save_metric", "dice")),
         monitor_mode=str(cfg["train"].get("save_metric_mode", "max")),
+        recovery_path=args.recovery_path,
+        recovery_identity=signature(cfg, split_records) if args.recovery_path else None,
     )
 
     if not history:

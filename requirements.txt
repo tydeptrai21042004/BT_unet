@@ -16,3 +16,7 @@ gdown>=5.2.0
 
 # Test/audit utilities
 pytest>=8.0.0
+
+# Automatic same-dataset mirrors for the Kaggle recovery queue
+kagglehub>=0.3.6
+datasets>=3.2,<5

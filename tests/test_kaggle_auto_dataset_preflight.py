@@ -30,10 +30,10 @@ def test_preflight_only_official_direct_urls():
     mod=_module(PREFLIGHT,'test_dataset_source_urls')
     for ds in mod.AUTO_DATASETS:
         urls=mod.candidate_urls(ds)
-        assert urls and all(u.startswith('https://') for u in urls)
+        assert (urls or ds == "bus_uclm") and all(u.startswith('https://') for u in urls)
         assert not any('drive.google.com' in u or 'kaggle.com' in u for u in urls)
     assert len(mod.candidate_urls('hyper_kvasir_seg'))==2
-    assert any('amazonaws.com' in u for u in mod.candidate_urls('bus_uclm'))
+    assert not mod.candidate_urls('bus_uclm')  # uses HF/Kaggle SDK, not ZIP probe
 
 
 def test_probe_rejects_html_without_full_download(monkeypatch):

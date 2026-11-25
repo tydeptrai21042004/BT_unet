@@ -54,7 +54,7 @@ def test_auto_prep_calls_public_source_no_pair_audit(tmp_path, monkeypatch):
     assert 'scripts/prepare_dataset.py' in calls[0]
     assert not {'--source-dir','--zip-path'}.intersection(calls[0])
     assert 'scripts/make_splits.py' in calls[1]
-    assert r.RUN_META['dataset_provenance']['kvasir_seg']['source']=='public_https_direct_auto'
+    assert r.RUN_META['dataset_provenance']['kvasir_seg']['source']=='https'
     assert '--download-url' in calls[0]
     assert 'dataset_content_sha256' not in r.RUN_META
     assert 'kvasir_seg' in r.PREPARED
