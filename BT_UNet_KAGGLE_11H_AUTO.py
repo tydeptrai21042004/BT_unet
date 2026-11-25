@@ -35,7 +35,7 @@ if checkout.exists():
         raise RuntimeError('Checkout remote differs; refusing to remove non-runner files')
     shutil.rmtree(checkout)
 print(f'[AUTO DATASETS] Automatic Kaggle/Hugging Face/HTTPS sources | {TOTAL_EXPERIMENTS} independent experiments',flush=True)
-print(f'[START] #{FIRST_EXPERIMENT}/{TOTAL_EXPERIMENTS} | budget {SESSION_HOURS}h',flush=True)
+print(f'[START] #{FIRST_EXPERIMENT}/{TOTAL_EXPERIMENTS} | budget {SESSION_HOURS}h | reject over-budget estimates',flush=True)
 subprocess.run(['git','clone',REPO_URL,str(checkout)],check=True)
 if PINNED_COMMIT:
     subprocess.run(['git','-C',str(checkout),'checkout','--detach',PINNED_COMMIT],check=True)
@@ -46,7 +46,7 @@ runner=checkout/'scripts/kaggle/multi_t4_runner.py'
 if not runner.is_file():
     raise FileNotFoundError('Kaggle runner missing from GitHub. Push the updated FULL ZIP first.')
 source=runner.read_text(encoding='utf-8')
-if "'AUTO':165" not in source or 'epoch_recovery_no_cold_start_calibration' not in source:
+if "'AUTO':165" not in source or 'strict_full_run_budget_gate' not in source:
     raise RuntimeError('GitHub has the old scheduler/exporter. Push the updated FULL ZIP to GitHub before running.')
 os.environ['BT_T4_MONOTONIC_START']=str(started)
 os.environ['BT_KAGGLE_WORKDIR']=str(work)

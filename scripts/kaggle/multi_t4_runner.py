@@ -547,15 +547,19 @@ def calibrate(train,config,ckpt):
     for flag,value in [('--config',str(cp)),('--epochs','1'),('--output-root',str(cal_root))]:
         if flag in cmd:cmd[cmd.index(flag)+1]=value
         else:cmd.extend([flag,value])
-    cost=run_cmd(cmd,cwd=REPO,max_seconds=3600,name='calibration_1epoch')
+    # Match AUTO's epoch-boundary checkpoint I/O without touching real recovery.
+    if SCOPE=='AUTO':
+        cmd.extend(['--recovery-path',str(cal_root/'calibration_recovery.pt')])
+    try:
+        cost=run_cmd(cmd,cwd=REPO,max_seconds=3600,name='calibration_1epoch')
+    finally:
+        shutil.rmtree(cal_root,ignore_errors=True)
     RUN_META['calibration_seconds']=round(cost,2)
     expected_seconds=cost*SPEC['epochs']*1.08
     RUN_META['estimated_full_train_seconds']=round(expected_seconds,1)
     print('[PREFLIGHT] 1-epoch wall time',round(cost,1),'s; conservative estimate:',round(expected_seconds/3600,2),'h')
-    shutil.rmtree(cal_root,ignore_errors=True)
-    # Refuse to start an unfinishable run rather than change model epochs silently.
-    if expected_seconds>remaining()-CLEANUP_RESERVE-EVAL_AND_OUTPUT_RESERVE:
-        raise RuntimeError('PROJECTED_OVER_BUDGET: predicted training plus evaluation/analysis does not fit within T4 session. No epoch count changed.')
+    # Admission is decided once by _preflight, for both fresh and cached estimates.
+    return cost
 
 def postprocess(ckpt):
     if not SPEC.get('posthoc'):return
@@ -712,9 +716,8 @@ def _preflight(train, config, ckpt, evaluations):
     # A realistic conservative bound includes *all* test targets and optional post-hoc GPU work.
     EVAL_AND_OUTPUT_RESERVE=(240 + 120*len(evaluations) if SCOPE=='AUTO' else 600 + 1200*len(evaluations)) + (6800 if SPEC.get('posthoc') else 0)
     if SCOPE=='AUTO':
+        RUN_META['time_policy']='strict_full_run_budget_gate'
         hard_check(extra=EVAL_AND_OUTPUT_RESERVE+120)
-        RUN_META['time_policy']='epoch_recovery_no_cold_start_calibration'
-        return None
     key=_calibration_key(config)
     if key in CALIBRATION_CACHE:
         cost=CALIBRATION_CACHE[key]
@@ -722,9 +725,7 @@ def _preflight(train, config, ckpt, evaluations):
         RUN_META['calibration_seconds']=round(cost,2)
         print('[REUSED TIME ESTIMATE]',round(cost,1),'seconds/epoch for same configuration',flush=True)
     else:
-        # calibrate() has a budget check after measuring. On failure, the time observation is still logged.
-        calibrate(train, config, ckpt)
-        cost=RUN_META['calibration_seconds']
+        cost=calibrate(train, config, ckpt)
         CALIBRATION_CACHE[key]=cost
     expected=cost*SPEC['epochs']*1.08
     RUN_META['estimated_full_train_seconds']=round(expected,1)
@@ -967,20 +968,23 @@ def run_multi_session():
             # Explicit post-train evaluation/analysis/packaging time is held back.
             train_limit=max(20,remaining()-CLEANUP_RESERVE-EVAL_AND_OUTPUT_RESERVE)
             recovery_path=None
+            resumed_training=False
             if SCOPE=='AUTO':
                 recovery_path=BASE/'BT_UNET_RECOVERY'/f"{SPEC['id']}.pt"
                 if not recovery_path.exists():
                     for candidate in Path('/kaggle/input').rglob(recovery_path.name) if Path('/kaggle/input').exists() else []:
                         recovery_path.parent.mkdir(parents=True,exist_ok=True)
                         shutil.copy2(candidate,recovery_path); break
+                resumed_training=recovery_path.is_file()
                 train += ['--recovery-path',str(recovery_path)]
             actual_train_seconds=run_cmd(train,cwd=REPO,max_seconds=train_limit,name='train_full')
             RUN_META['actual_train_seconds']=round(actual_train_seconds,2)
-            if SCOPE=='AUTO':
+            if SCOPE=='AUTO' and not resumed_training:
+                # A resumed run covers fewer epochs; do not use its wall time
+                # as a full-run calibration for subsequent seeds.
                 # This measured full run is more informative than extrapolation
                 # from one cold-start calibration epoch for subsequent seeds.
                 key=_calibration_key(config)
-                previous=CALIBRATION_CACHE.get(key)
                 observed=actual_train_seconds/SPEC['epochs']
                 CALIBRATION_CACHE[key]=observed
                 print('[LEARNED TIME] measured seconds/epoch',round(observed,2),

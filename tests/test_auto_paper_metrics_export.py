@@ -172,22 +172,49 @@ def test_compact_auto_session_zip(tmp_path,monkeypatch):
     assert all_rows[1]['loss']=='---'
 
 
-def test_auto_budget_allows_epoch_recovery_instead_of_permanent_deferral(tmp_path,monkeypatch):
+def _budget_runner(tmp_path, monkeypatch):
     runner_script=ROOT/'scripts/kaggle/multi_t4_runner.py'
     monkeypatch.setattr(sys,'argv',['multi_t4_runner.py','--scope','AUTO','--one-based',
-                                   '--start-index','2','--bundle-session'])
+                                   '--start-index','10','--bundle-session'])
     monkeypatch.setenv('BT_KAGGLE_WORKDIR',str(tmp_path))
     spec=importlib.util.spec_from_file_location('estimate_runner',runner_script)
     r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r)
-    base={'experiment':{'name':'unit'}, 'model':{'name':'unet'},
-          'train':{'epochs':100,'seed':1337},'data':{'dataset':'kvasir_seg'}}
+    r._activate(r.QUEUE[9])
+    assert r.SPEC['model']=='unetpp' and r.SPEC['epochs']==100
+    base={'experiment':{'name':'unit'}, 'model':{'name':'unetpp'},
+          'train':{'epochs':100,'seed':42},'data':{'dataset':'kvasir_seg'}}
+    return r, base
+
+
+def test_auto_budget_rejects_over_estimate_and_accepts_fitting_job(tmp_path,monkeypatch):
+    r,base=_budget_runner(tmp_path,monkeypatch)
     key=r._calibration_key(base)
-    r.CALIBRATION_CACHE[key]=130.0
-    r._activate(r.QUEUE[1])
-    monkeypatch.setattr(r,'remaining',lambda:7.56*3600)
-    assert r._preflight([],base,None,[('test',[])]) is None
-    assert r.RUN_META['time_policy']=='epoch_recovery_no_cold_start_calibration'
-    r.CALIBRATION_CACHE[key]=121.3
-    monkeypatch.setattr(r,'remaining',lambda:4.1*3600)
-    assert r._preflight([],base,None,[('test',[])]) is None
+    r.CALIBRATION_CACHE[key]=400.0
+    monkeypatch.setattr(r,'remaining',lambda:12*3600)
+    with pytest.raises(RuntimeError,match='PROJECTED_OVER_BUDGET'):
+        r._preflight([],base,None,[('test',[])])
+    assert r.RUN_META['time_policy']=='strict_full_run_budget_gate'
+    assert r.RUN_META['estimated_full_train_seconds']==43200
+    r.CALIBRATION_CACHE[key]=350.0
+    assert r._preflight([],base,None,[('test',[])])==pytest.approx(37800)
+    monkeypatch.setattr(r,'remaining',lambda:10*3600)
+    with pytest.raises(RuntimeError,match='PROJECTED_OVER_BUDGET'):
+        r._preflight([],base,None,[('test',[])])
     assert r.args.max_hours==12.0
+
+
+def test_auto_uncached_calibration_before_admission(tmp_path,monkeypatch):
+    r,base=_budget_runner(tmp_path,monkeypatch)
+    calls=[]
+    def calibrate(*args):
+        calls.append(args)
+        return 400.0
+    monkeypatch.setattr(r,'calibrate',calibrate)
+    monkeypatch.setattr(r,'remaining',lambda:12*3600)
+    with pytest.raises(RuntimeError,match='PROJECTED_OVER_BUDGET'):
+        r._preflight([],base,None,[('test',[])])
+    assert len(calls)==1
+    assert r.CALIBRATION_CACHE[r._calibration_key(base)]==400.0
+    with pytest.raises(RuntimeError,match='PROJECTED_OVER_BUDGET'):
+        r._preflight([],base,None,[('test',[])])
+    assert len(calls)==1
