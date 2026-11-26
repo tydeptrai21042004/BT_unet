@@ -32,10 +32,15 @@ parser.add_argument('--keep-scratch', action='store_true',
 parser.add_argument('--plan-csv', action='store_true',
     help='Write numbered experiment manifest CSV without downloading or training')
 parser.add_argument('--plan-only', action='store_true')
+parser.add_argument('--extend-300', action='store_true', help='Append 135 jobs to immutable AUTO-165 queue')
+parser.add_argument('--rerun-proposal', action='store_true', help='Use versioned AUTO-324 queue with revised proposal in all related runs')
+parser.add_argument('--reuse-dir', type=Path, help='Directory of prior verified AUTO session ZIPs; skip already completed IDs')
 parser.add_argument('--strict-baselines', action='store_true', help='Stop rather than run specialized paper-aligned reimplementations')
 args = parser.parse_args()
+if args.rerun_proposal: args.extend_300 = True
 PAPER_METRICS_COMPACT_V2 = True  # Kaggle bootstrap requires the new results-only format
 SCOPE = args.scope
+EXTEND_300 = args.extend_300
 if args.start_index is None:
     args.start_index = 1 if args.one_based else 0
 if args.one_based and args.start_index < 1:
@@ -171,6 +176,8 @@ def baseline_gate():
               'NOT an independently verified original-paper model. To run it as an explicitly '+
               'labeled controlled comparison only, set BT_ALLOW_PAPER_ALIGNED=1. '+
               'Never describe these numbers as author-official reproduction.')
+    elif name=='linknet':
+        RUN_META['baseline_fidelity']='published_LinkNet_ResNet18_paper_aligned_binary_reimplementation'
     elif name in architectural:
         RUN_META['baseline_fidelity']='architecture_control_NOT_byte_identical_official_code'
     elif SPEC.get('type')=='revision' and SPEC.get('group') in {'factorial','residual','convergence','primary'}:
@@ -363,7 +370,7 @@ def setup_datasets():
         source_path=os.getenv('BT_DATA_'+dataset.upper()+'_SOURCE')
         zip_path=os.getenv('BT_DATA_'+dataset.upper()+'_ZIP')
         if SCOPE == 'AUTO' and not (source_path or zip_path):
-            if dataset in {'bus_uclm','kvasir_instrument'}:
+            if dataset in {'bus_uclm','kvasir_instrument','cvc_clinicdb','cvc_colondb','etis','isic2018'}:
                 cache=SESSION_DATA/'automatic_sources'
                 run_cmd([sys.executable,'scripts/kaggle/auto_acquire.py','--dataset',dataset,'--cache',str(cache)],cwd=REPO,max_seconds=1800,name='acquire_'+dataset)
                 receipt=json.loads((cache/(dataset+'.json')).read_text())
@@ -399,7 +406,7 @@ def setup_datasets():
             download_env=os.environ.copy()
             download_env['BT_AUTO_DATASET_TLS_FALLBACK']='1'
         if args is not None: run_cmd(args,cwd=REPO,max_seconds=1800 if SCOPE=='AUTO' else 3600,name='prepare_'+dataset,env=download_env)
-        if SCOPE=='AUTO' and dataset in {'kvasir_instrument','bus_uclm'}:
+        if SCOPE=='AUTO' and dataset in {'kvasir_instrument','bus_uclm','cvc_clinicdb','cvc_colondb','etis','isic2018'}:
             from scripts.kaggle.auto_acquire import EXPECTED
             metadata=DATA/'processed'/dataset/'metadata.csv'
             with metadata.open(newline='',encoding='utf-8') as f: count=len(list(csv.DictReader(f)))
@@ -414,7 +421,7 @@ def setup_datasets():
                 raise RuntimeError('Expected 1000 prepared Kvasir-SEG pairs, got '+str(len(rows)))
             print('[DATA] Prepared Kvasir-SEG: 1000 image-mask pairs',flush=True)
         split_args=[sys.executable,'scripts/make_splits.py','--dataset',dataset,'--data-root',str(DATA),'--image-size',str(SPEC['image_size']),'--seed','42']
-        if dataset=='isbi2012':split_args+=['--strategy','contiguous']
+        if dataset in {'isbi2012','cvc_clinicdb','cvc_colondb','etis'}:split_args+=['--strategy','contiguous']
         run_cmd(split_args,cwd=REPO,max_seconds=600,name='split_'+dataset)
         # Optional externally reviewed official / patient-level manifests. If present,
         # overwrite the exploratory image-level splits for every session identically.
@@ -428,7 +435,23 @@ def setup_datasets():
                 shutil.copyfile(src,DATA/'splits'/dataset/(part+'.txt'))
             RUN_META.setdefault('split_protocol',{})[dataset]='user_supplied_grouped_or_official'
         else:
-            RUN_META.setdefault('split_protocol',{})[dataset]=('patient_grouped_seed42_author_test_prefixes' if dataset=='bus_uclm' else ('contiguous' if dataset=='isbi2012' else 'exploratory_random_image_split_seed42'))
+            RUN_META.setdefault('split_protocol',{})[dataset]=('patient_grouped_seed42_author_test_prefixes' if dataset=='bus_uclm' else ('contiguous_exploratory_not_patient_grouped' if dataset in {'cvc_clinicdb','cvc_colondb','etis'} else 'contiguous' if dataset=='isbi2012' else 'exploratory_random_image_split_seed42'))
+        if SCOPE == 'AUTO' and EXTEND_300:
+            # Record immutable content and membership fingerprints once per acquired dataset.
+            from src.datasets import build_dataset
+            digest=hashlib.sha256()
+            ids={}
+            for part in ('train','val','test'):
+                members=[]
+                for sid,img,mask in build_dataset(dataset,str(DATA),split=part,image_size=SPEC['image_size']).samples:
+                    members.append(sid)
+                    if sid in ids: raise RuntimeError(f'Duplicate split membership: {sid}')
+                    ids[sid]=(Path(img),Path(mask))
+                if not members: raise RuntimeError(f'Empty {dataset} {part} split')
+                RUN_META.setdefault('split_membership_sha256',{}).setdefault(dataset,{})[part]=hashlib.sha256(('\n'.join(sorted(members))+'\n').encode()).hexdigest()
+            for sid,(img,mask) in sorted(ids.items()):
+                digest.update((sid+'\0').encode());digest.update(sha256_path(img).encode());digest.update(sha256_path(mask).encode())
+            RUN_META.setdefault('dataset_content_sha256',{})[dataset]=digest.hexdigest()
         if SCOPE == 'AUTO':
             # Fast track: no per-file hashes, size assertions, duplication audits,
             # or manual data-source verification. Basic dataset preparation and
@@ -436,6 +459,8 @@ def setup_datasets():
             PREPARED.add(dataset)
             DATASET_META[dataset] = {'dataset_provenance':RUN_META['dataset_provenance'][dataset],
                                      'split_protocol':RUN_META['split_protocol'][dataset]}
+            for key in ('split_membership_sha256','dataset_content_sha256'):
+                if dataset in RUN_META.get(key,{}): DATASET_META[dataset][key]=RUN_META[key][dataset]
             print('[AUTO READY]',dataset,flush=True)
             continue
         # Strict manifest existence + overlap checks, no implicit fallback.
@@ -496,6 +521,8 @@ def make_job():
         selected=[j for j in options if j['variant']==SPEC['group']+'_'+SPEC['variant']]
         if len(selected)!=1:raise RuntimeError('Variant not uniquely found in revision run plan')
         job=selected[0]
+        from scripts.kaggle.extension324 import apply_model_revision
+        apply_model_revision(SPEC,job['config'])
         config_path=Path(job['config_path']);config_path.parent.mkdir(parents=True,exist_ok=True)
         config_path.write_text(yaml.safe_dump(job['config'],sort_keys=False),encoding='utf-8')
         return job['train_command'],Path(job['checkpoint']),[(SPEC['dataset'],job['eval_command'])],job['config'],config_path
@@ -503,6 +530,8 @@ def make_job():
     if not src.is_file():raise FileNotFoundError('Missing actual model config: '+str(src))
     cfg=yaml.safe_load(src.read_text())
     if not isinstance(cfg,dict) or 'model' not in cfg:raise ValueError('Malformed config')
+    from scripts.kaggle.extension324 import apply_model_revision
+    apply_model_revision(SPEC,cfg)
     model=SPEC['model'];tag=SPEC['id']
     run_root=RESULTS/'jobs'/tag
     cfg.setdefault('experiment',{})['name']=tag
@@ -659,6 +688,15 @@ else:
     QUEUE = _decoded_queues[SCOPE]
     QUEUE_SHA256 = QUEUE_SHA256_BY_SCOPE[SCOPE]
 assert len(QUEUE) == {'CORE':129,'OPTIONAL':132,'ALL':261,'AUTO':165}[SCOPE]
+if args.extend_300:
+    if SCOPE!='AUTO': raise ValueError('--extend-300 requires --scope AUTO')
+    from scripts.kaggle.extension300 import append_jobs, NEW_DATASETS
+    QUEUE=append_jobs(QUEUE)
+    if args.rerun_proposal:
+        from scripts.kaggle.extension324 import revise_jobs
+        QUEUE=revise_jobs(QUEUE)
+    AUTO_DATASETS=AUTO_DATASETS.union(NEW_DATASETS)
+    QUEUE_SHA256=hashlib.sha256(json.dumps(QUEUE,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 assert len({x['id'] for x in QUEUE}) == len(QUEUE)
 assert all(x['epochs'] in (30,50,100) and x['batch_size']==6 and x['image_size']==352 for x in QUEUE)
 
@@ -673,7 +711,7 @@ CROSS_CHECKED = set()
 CALIBRATION_CACHE = {}
 JOB_START = START
 EVAL_AND_OUTPUT_RESERVE = 1800
-SESSION = BASE / ('BT_UNET_MULTI_' + SCOPE + '_from_' + str(START_INDEX+1 if args.one_based else START_INDEX))
+SESSION = BASE / ('BT_UNET_MULTI_' + SCOPE + ('_H2' if args.rerun_proposal else '') + '_from_' + str(START_INDEX+1 if args.one_based else START_INDEX))
 SESSION_LOG = SESSION/'session_status.json'
 SESSION_REPO = REPO_ROOT
 SESSION_DATA = SESSION/'data'
@@ -711,10 +749,15 @@ def _calibration_key(config):
     identity=json.dumps(c,sort_keys=True,default=str,separators=(',',':')).encode()
     return hashlib.sha256(identity).hexdigest()
 
+def _benchmark_selected():
+    return args.extend_300 and SPEC['dataset']=='cvc_clinicdb' and SPEC['seed']==42 and SPEC['type']=='standard'
+
 def _preflight(train, config, ckpt, evaluations):
     global EVAL_AND_OUTPUT_RESERVE
     # A realistic conservative bound includes *all* test targets and optional post-hoc GPU work.
     EVAL_AND_OUTPUT_RESERVE=(240 + 120*len(evaluations) if SCOPE=='AUTO' else 600 + 1200*len(evaluations)) + (6800 if SPEC.get('posthoc') else 0)
+    if _benchmark_selected(): EVAL_AND_OUTPUT_RESERVE += 360
+    if args.extend_300: EVAL_AND_OUTPUT_RESERVE += 300  # larger evaluation/retained checkpoint packaging
     if SCOPE=='AUTO':
         RUN_META['time_policy']='strict_full_run_budget_gate'
         hard_check(extra=EVAL_AND_OUTPUT_RESERVE+120)
@@ -775,7 +818,7 @@ def bundle_session(status):
             raise RuntimeError('Cannot bundle missing/invalid completed archive: '+str(a))
     first=START_INDEX+1
     last=status['next_index']
-    target=BASE/f'BT_UNET_SESSION_{SCOPE}_{first:04d}_TO_{last:04d}.zip'
+    target=BASE/f'BT_UNET_SESSION_{SCOPE}_{"H2_" if args.rerun_proposal else ""}{first:04d}_TO_{last:04d}.zip'
     if target.exists():
         raise FileExistsError('Session bundle already exists; not overwriting: '+str(target))
     # A second copy is needed while making a single ZIP. Keep the per-job ZIPs
@@ -791,6 +834,7 @@ def bundle_session(status):
         'last_completed_experiment_number':max(status.get('completed_numbers',[]) or [0]),
         'last_processed_experiment_number':last,'next_experiment_number':last+1,
         'total_experiments':len(QUEUE),
+        'reused_experiment_numbers':status.get('reused_numbers',[]),
         'git_commit':status.get('git_commit'), 'completed_ids':status['completed_ids'],
         'completed_experiment_numbers':status.get('completed_numbers',[]),
         'skipped_jobs':status.get('skipped_jobs',[]),
@@ -809,7 +853,7 @@ def bundle_session(status):
                 if filename.exists():
                     z.write(filename,arcname=filename.name,compress_type=zipfile.ZIP_DEFLATED)
             if compact_auto:
-                for filename in sorted(BASE.glob('BT_UNET_*RESULTS_AUTO.*')) + [BASE/'BT_UNET_PAPER_VALUES_AUTO.tex']:
+                for filename in sorted(BASE.glob('BT_UNET_*RESULTS_AUTO.*')) + [BASE/'BT_UNET_PAPER_VALUES_AUTO.tex', BASE/'BT_UNET_EFFICIENCY_AUTO.csv']:
                     if filename.is_file():
                         z.write(filename, arcname=filename.name, compress_type=zipfile.ZIP_DEFLATED)
                 for archive in archives:
@@ -869,6 +913,7 @@ def _save_queue(status):
        'successful_count_this_session':len(status.get('completed_ids',[])),
        'skipped_count_this_session':len(status.get('skipped_jobs',[])),
        'total_experiments':len(QUEUE),
+        'reused_experiment_numbers':status.get('reused_numbers',[]),
        'plan_sha256':QUEUE_SHA256,
        'completed_in_this_session':status['completed_ids'],
        'note':'Use next_experiment_number in the next independent Kaggle session; skipped jobs are NOT completed.'
@@ -903,6 +948,13 @@ def run_multi_session():
        'total_jobs':len(QUEUE),'completed_ids':[],'completed_numbers':[],
        'skipped_jobs':[],'failed_jobs':[],
        'stop_reason':None,'git_commit':None,'session_archives':[]}
+    reused=set()
+    if args.reuse_dir:
+        if SCOPE!='AUTO': raise ValueError('--reuse-dir requires AUTO')
+        from scripts.kaggle.reuse_completed import import_rows
+        reused=import_rows(args.reuse_dir,PLAN_CSV,COMPACT_RESULTS,QUEUE)
+        status['reused_numbers']=sorted(reused)
+        print('[REUSE VERIFIED ARCHIVE ROWS]',len(reused),flush=True)
     _activate(QUEUE[START_INDEX])
     # Set up the code exactly once for every grouped Kaggle session.
     try:
@@ -926,6 +978,11 @@ def run_multi_session():
     if end <= START_INDEX: raise ValueError('End experiment precedes start')
     for index in range(START_INDEX,end):
         spec=QUEUE[index]
+        if index+1 in reused:
+            print('[REUSE] Skipping completed experiment',index+1,spec['id'],flush=True)
+            status['next_index']=index+1
+            _save_queue(status)
+            continue
         _activate(spec)
         if SCOPE=='AUTO' and _auto_needs(spec).intersection(AUTO_UNAVAILABLE):
             _auto_skip(status,index,spec)
@@ -952,10 +1009,11 @@ def run_multi_session():
             if SCOPE=='AUTO':
                 try:
                     setup_datasets()
-                except (RuntimeError,FileNotFoundError,ValueError) as data_error:
+                except (RuntimeError,FileNotFoundError,ValueError,TimeoutError) as data_error:
+                    if isinstance(data_error,TimeoutError) and remaining()<CLEANUP_RESERVE+1800: raise
                     # This is a dataset acquisition/parsing problem, NOT a
                     # completed experiment. Do not retry the same dead URL 80x.
-                    if spec['dataset'] in {'kvasir_instrument','bus_uclm'}: raise
+                    # Failed sources are recorded as skipped, never completed.
                     for name in sorted(_auto_needs(spec)-PREPARED):
                         AUTO_UNAVAILABLE[name]='dataset preparation failed: '+str(data_error)
                     _auto_skip(status,index,spec)
@@ -996,6 +1054,12 @@ def run_multi_session():
                 run_cmd(command,cwd=REPO,max_seconds=min(1800,remaining()-CLEANUP_RESERVE-700),name='eval_'+label)
             if SPEC.get('posthoc'):
                 postprocess(ckpt)
+            if _benchmark_selected():
+                try:
+                    run_cmd([sys.executable,'scripts/revision/benchmark_inference.py','--checkpoint',str(ckpt),'--image-size',str(SPEC['image_size']),'--batch-size','1','--warmup','10','--repetitions','30','--device','cpu' if os.environ.get('BT_KAGGLE_TEST_CPU') else 'cuda:0','--output',str(RESULTS/'analysis'/'efficiency.json')],cwd=REPO,max_seconds=300,name='efficiency')
+                except (TimeoutError,RuntimeError) as benchmark_error:
+                    RUN_META['optional_benchmark_error']=str(benchmark_error)
+                    print('[OPTIONAL BENCHMARK FAILED]',benchmark_error,flush=True)
             for ds in sorted(set(SPEC.get('sources',[])+SPEC.get('targets',[])+[SPEC['dataset']])):
                 for part in ('train','val','test'):
                     src=DATA/'splits'/ds/(part+'.txt')
@@ -1006,10 +1070,11 @@ def run_multi_session():
             RUN_META['status']='complete'
             if SCOPE=='AUTO':
                 from scripts.kaggle.results_export import export_completed, update_reports, print_paper_result
+                RUN_META['retain_best_checkpoint'] = (SPEC['type']=='standard' and (SPEC['seed']==42 or SPEC['model'] in {'unet','dapr_unet','linknet','resunetpp'})) or SPEC.get('group')=='convergence' or (args.rerun_proposal and SPEC.get('fourier_hermitian_constraint') and SPEC['seed']==42)
                 paper_row, compact_dir=export_completed(index+1,SPEC,evals,RESULTS,COMPACT_RESULTS,RUN_META)
                 all_completed=update_reports(BASE,COMPACT_RESULTS,QUEUE)
-                print_paper_result(paper_row)
-                print('[SESSION RESULTS]',len(all_completed),'completed; compact export without weights/images',flush=True)
+                print_paper_result(paper_row, len(QUEUE))
+                print('[SESSION RESULTS]',len(all_completed),'completed; compact export with selected best checkpoints and split manifests',flush=True)
                 archive_path=compact_dir
             else:
                 package_all()
@@ -1086,7 +1151,7 @@ def run_multi_session():
     print('REMAINING PLANNED JOBS =',len(QUEUE)-status['next_index'])
     print('STATUS FILE:',SESSION_LOG)
     print('NEXT SESSION STATE:',BASE/('BT_UNET_NEXT_'+SCOPE+'.json'))
-    print('RESULTS: compact BT_UNET_SESSION_AUTO_*.zip, 165-row BT_UNET_PAPER_RESULTS_AUTO.csv'
+    print('RESULTS: compact BT_UNET_SESSION_AUTO_*.zip, paper-ready BT_UNET_PAPER_RESULTS_AUTO.csv'
           if SCOPE=='AUTO' else 'RESULTS: each BT_UNET_RESULTS__*.zip in /kaggle/working')
     print('STOP REASON:',status['stop_reason'])
     print('='*75,flush=True)

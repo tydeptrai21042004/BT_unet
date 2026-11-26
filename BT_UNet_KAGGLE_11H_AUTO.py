@@ -9,11 +9,12 @@ from pathlib import Path
 
 # EDIT ONLY FIRST_EXPERIMENT when starting the next independent Kaggle session.
 REPO_URL = 'https://github.com/tydeptrai21042004/BT_unet.git'
-FIRST_EXPERIMENT = 1
-LAST_EXPERIMENT = 165  # Inclusive; use 12, 93, or 105 for targeted recovery.
+FIRST_EXPERIMENT = 1  # Start from the beginning; verified unchanged baseline archives are skipped.
+LAST_EXPERIMENT = 324  # Inclusive.
+REUSE_ARCHIVE_DIR = '/kaggle/input'  # Mount prior BT_UNET_SESSION_AUTO_*.zip archives here.
 PINNED_COMMIT = ''  # Pin the NEW SHA after pushing the updated code; the previous SHA runs old behavior.
 SESSION_HOURS = 12.0
-TOTAL_EXPERIMENTS = 165
+TOTAL_EXPERIMENTS = 324
 
 assert 1 <= FIRST_EXPERIMENT <= TOTAL_EXPERIMENTS + 1
 assert FIRST_EXPERIMENT <= LAST_EXPERIMENT + 1 <= TOTAL_EXPERIMENTS + 1
@@ -46,14 +47,15 @@ runner=checkout/'scripts/kaggle/multi_t4_runner.py'
 if not runner.is_file():
     raise FileNotFoundError('Kaggle runner missing from GitHub. Push the updated FULL ZIP first.')
 source=runner.read_text(encoding='utf-8')
-if "'AUTO':165" not in source or 'strict_full_run_budget_gate' not in source:
+if '--rerun-proposal' not in source or 'strict_full_run_budget_gate' not in source:
     raise RuntimeError('GitHub has the old scheduler/exporter. Push the updated FULL ZIP to GitHub before running.')
 os.environ['BT_T4_MONOTONIC_START']=str(started)
 os.environ['BT_KAGGLE_WORKDIR']=str(work)
 if PINNED_COMMIT: os.environ['BT_UNET_COMMIT']=PINNED_COMMIT
-cmd=[sys.executable,str(runner),'--scope','AUTO','--one-based',
+cmd=[sys.executable,str(runner),'--scope','AUTO','--rerun-proposal','--one-based',
      '--start-index',str(FIRST_EXPERIMENT),'--max-hours',str(SESSION_HOURS),
      '--bundle-session','--end-experiment',str(LAST_EXPERIMENT)]
+if Path(REUSE_ARCHIVE_DIR).is_dir(): cmd += ['--reuse-dir',REUSE_ARCHIVE_DIR]
 completed=subprocess.run(cmd,cwd=str(checkout),check=False)
 if next_file.is_file():
     print('[NEXT SESSION FIRST_EXPERIMENT =]',next_file.read_text().strip())
@@ -66,7 +68,7 @@ for label in ('BT_UNET_PAPER_RESULTS_AUTO.csv', 'BT_UNET_COMPLETED_RESULTS_AUTO.
     candidate=work/label
     if candidate.exists():
         print('[PAPER-READY OUTPUT]',candidate, f'{candidate.stat().st_size} bytes')
-print('[NOTE] AUTO ZIPs contain evaluation metrics, per-image CSV and training histories; no weights/images.')
+print('[NOTE] AUTO ZIPs contain evaluation metrics, per-image CSV and training histories; selected best checkpoints and split manifests.')
 print('[RECOVERY CHECKPOINTS — retain or attach as Kaggle input in next session]', *map(str, (work/'BT_UNET_RECOVERY').glob('*.pt')))
 print('[SCHEDULER EXIT CODE]',completed.returncode)
 report=work/'BT_UNET_DATASET_PREFLIGHT_AUTO.json'

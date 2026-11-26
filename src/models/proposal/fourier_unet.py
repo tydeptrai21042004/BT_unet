@@ -38,6 +38,7 @@ class FourierSpectralBottleneck(nn.Module):
         zero_init_output: bool = True,
         residual_signal: str = "difference",
         channel_mix_location: str = "frequency",
+        hermitian_constraint: bool = False,
     ) -> None:
         super().__init__()
         if channels <= 0:
@@ -70,6 +71,7 @@ class FourierSpectralBottleneck(nn.Module):
         if channel_mix_location == "spatial" and residual:
             raise ValueError("Spatial-mixer control is only defined for direct reconstruction")
         self.channel_mix_location = channel_mix_location
+        self.hermitian_constraint = bool(hermitian_constraint)
         self.residual = bool(residual)
         self.zero_init_output = bool(zero_init_output)
 
@@ -78,6 +80,7 @@ class FourierSpectralBottleneck(nn.Module):
         self.pre_act = self._make_act(act)
 
         h0, w0 = int(init_hw[0]), int(init_hw[1])
+        self.init_spatial_width = w0
         self.amplitude_logits = nn.Parameter(torch.empty(1, hidden, h0, w0 // 2 + 1))
         self.phase_logits = nn.Parameter(torch.empty(1, hidden, h0, w0 // 2 + 1))
 
@@ -141,7 +144,7 @@ class FourierSpectralBottleneck(nn.Module):
             return tensor
         return F.interpolate(tensor, size=size, mode="bilinear", align_corners=False)
 
-    def _response(self, spectrum: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _response(self, spectrum: torch.Tensor, spatial_width: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         frequency_size = spectrum.shape[-2:]
         if self.use_amplitude:
             logits = self._resize_parameter(self.amplitude_logits, frequency_size)
@@ -153,6 +156,18 @@ class FourierSpectralBottleneck(nn.Module):
             phase = self.phase_max * torch.tanh(logits)
         else:
             phase = torch.zeros_like(spectrum.real)
+        if self.hermitian_constraint:
+            if spatial_width is None:
+                raise ValueError("Original spatial width required for constrained real FFT")
+            h, wf = frequency_size
+            partner = (-torch.arange(h, device=spectrum.device)) % h
+            boundary = torch.zeros(wf, dtype=torch.bool, device=spectrum.device)
+            boundary[0] = True
+            if spatial_width % 2 == 0: boundary[-1] = True
+            boundary = boundary.view(1, 1, 1, -1)
+            # Average log-gains (equivalent to even bounded response) and antisymmetrize phase.
+            gain = torch.where(boundary, torch.sqrt(gain * gain.index_select(-2, partner)), gain)
+            phase = torch.where(boundary, .5 * (phase - phase.index_select(-2, partner)), phase)
         return gain, phase
 
     def _mix(self, spectrum: torch.Tensor) -> torch.Tensor:
@@ -172,7 +187,7 @@ class FourierSpectralBottleneck(nn.Module):
         z = self.pre_act(self.pre_norm(self.pre(x)))
         spatial_size = z.shape[-2:]
         spectrum = torch.fft.rfft2(z, dim=(-2, -1), norm="ortho")
-        gain, phase = self._response(spectrum)
+        gain, phase = self._response(spectrum, spatial_size[-1])
         modulated = spectrum * torch.polar(gain, phase)
         transformed = self._mix(modulated) if self.channel_mix_location == "frequency" else modulated
 
@@ -269,6 +284,7 @@ class _PlainFourierUNetBase(nn.Module):
         fourier_zero_init_output: bool = True,
         fourier_residual_signal: str = "difference",
         fourier_channel_mix_location: str = "frequency",
+        fourier_hermitian_constraint: bool = False,
         norm: str = "bn",
         act: str = "relu",
         decoder_use_cbam: bool = False,
@@ -309,6 +325,7 @@ class _PlainFourierUNetBase(nn.Module):
             zero_init_output=fourier_zero_init_output,
             residual_signal=fourier_residual_signal,
             channel_mix_location=fourier_channel_mix_location,
+            hermitian_constraint=fourier_hermitian_constraint,
         )
         self.decoder = UNetDecoder(channels=channels, norm=norm, act=act, use_cbam=decoder_use_cbam)
         self.seg_head = nn.Conv2d(channels[0], num_classes, kernel_size=1)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import time
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from src.engine.output_utils import parse_model_output
 from scripts.train_one import build_loss
 from audit_splits import manifest_path
 from src.analysis.boundary_metrics import measure_binary
+from src.analysis.extended_metrics import probability_metrics, confusion_metrics
 from src.analysis.frequency_interventions import suppress_band, BANDS
 from src.analysis.corruptions import CorruptThenTransform, SUPPORTED
 from src.datasets import build_dataset, build_eval_transforms
@@ -53,6 +55,10 @@ def run(args):
                 raise ValueError('Cluster map contains missing/duplicate ID or missing cluster')
             cluster_by_id[sid] = group
     rows = []
+    evaluation_start = time.perf_counter()
+    is_cuda = str(device).startswith("cuda")
+    if is_cuda: torch.cuda.reset_peak_memory_stats(device)
+    forward_times = []
     # The validation evaluator measures the configured main-head loss averaged
     # over batches. Use that identical definition for the held-out test split;
     # validation loss must never be substituted for test loss.
@@ -66,7 +72,11 @@ def run(args):
         for batch in loader:
             images = batch['image'].to(device)
             masks_device = batch['mask'].to(device)
+            if is_cuda: torch.cuda.synchronize(device)
+            t0 = time.perf_counter()
             logits = parse_model_output(model(images)).main
+            if is_cuda: torch.cuda.synchronize(device)
+            forward_times.append((time.perf_counter()-t0, len(images)))
             batch_loss = float(loss_fn(logits, masks_device).item())
             if not np.isfinite(batch_loss):
                 raise ValueError('Non-finite loss on evaluation batch')
@@ -91,6 +101,8 @@ def run(args):
                 f2 = 5 * tp / max(5 * tp + 4 * fn + fp, 1)
                 values.update(pixel_accuracy=float(accuracy), specificity=float(specificity),
                               balanced_accuracy=float(balanced_accuracy), f2_score=float(f2))
+                values.update(confusion_metrics(tp, fp, tn, fn))
+                values.update(probability_metrics(probs[i,0], truth))
                 rows.append({'dataset': args.dataset, 'model': name, 'sample_id': sid,
                              'cluster_id': cluster_by_id.get(sid, ''),
                              'seed': int(training_seed), 'corruption_seed': args.seed, 'split': args.split, 'corruption': args.corruption,
@@ -104,7 +116,8 @@ def run(args):
     write_csv(rows, output / 'per_image.csv')
     metric_keys = ('dice', 'iou', 'precision', 'recall', 'mae',
                    'boundary_f1', 'hd95_pixels', 'assd_pixels',
-                   'pixel_accuracy', 'specificity', 'balanced_accuracy', 'f2_score')
+                   'pixel_accuracy', 'specificity', 'balanced_accuracy', 'f2_score',
+                   'surface_dice','mcc','foreground_area_error','brier','nll','ece','foreground_prediction_ece','auprc')
     metric_mean = {}
     metric_std = {}
     metric_median = {}
@@ -119,6 +132,11 @@ def run(args):
             metric_median[key] = float(np.median(good))
     test_loss = float(loss_sum / loss_batches)
     metric_mean['loss'] = test_loss
+    positives = sum(not bool(r['empty_ground_truth']) for r in rows)
+    if positives:
+        metric_mean['complete_miss_rate'] = sum(r['complete_miss'] for r in rows)/positives
+    metric_mean['empty_prediction_rate'] = sum(r['empty_prediction'] for r in rows)/len(rows)
+    metric_mean['undefined_distance_rate'] = sum(not bool(r['distance_defined']) for r in rows)/len(rows)
     summary = {'checkpoint_sha256': sha256_file(args.checkpoint), 'model': name, 'dataset': args.dataset,
                'split': args.split, 'num_samples': len(dataset), 'corruption': args.corruption,
                'severity': args.severity, 'training_seed': int(training_seed), 'corruption_seed': args.seed,
@@ -128,6 +146,15 @@ def run(args):
                'test_loss': test_loss, 'loss_name': loss_name,
                'loss_protocol': 'configured main-head loss, arithmetic mean of evaluation batch losses (same as validation)',
                'test_loss_num_batches': loss_batches,
+               'evaluation_seconds': time.perf_counter()-evaluation_start,
+               'parameters_trainable':sum(p.numel() for p in model.parameters() if p.requires_grad),
+               'parameters_total':sum(p.numel() for p in model.parameters()),
+               'eval_forward_seconds':sum(t for t,n in forward_times),
+               'eval_forward_images_per_second':sum(n for t,n in forward_times)/max(sum(t for t,n in forward_times),1e-12),
+               'eval_peak_allocated_mib':torch.cuda.max_memory_allocated(device)/1048576 if is_cuda else None,
+               'eval_timing_note':'Actual test batches incl. first forward; not warmup-controlled batch-1 latency. See benchmark_inference for standardized timing.',
+               'positive_sample_count': positives,
+               'metric_protocol_extended': 'macro per-image, surface dice tolerance equals boundary tolerance; AP is tie-aware; MCC undefined when denominator zero; foreground prediction ECE bins only p>=0.5',
                'distance_undefined_count': sum(not bool(r['distance_defined']) for r in rows),
                'complete_miss_count': sum(int(r['complete_miss']) for r in rows),
                'empty_prediction_count': sum(int(r['empty_prediction']) for r in rows),

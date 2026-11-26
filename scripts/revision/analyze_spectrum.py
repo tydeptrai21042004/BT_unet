@@ -38,7 +38,7 @@ def analyze_model(model, output):
     with torch.no_grad():
         # Generated at learned base grid, not necessarily input-dependent interpolated grid.
         dummy = torch.zeros((1, bt.hidden_channels, *shape), device=next(bt.parameters()).device, dtype=torch.complex64)
-        gain, phase = bt._response(dummy)
+        gain, phase = bt._response(dummy, bt.init_spatial_width if hasattr(bt, "init_spatial_width") else 2*(shape[-1]-1))
         gain, phase = gain.cpu().numpy()[0], phase.cpu().numpy()[0]
         if bt.use_channel_mixing:
             m = bt.spectral_channel_mixer.weight.detach().cpu().numpy()[:, :, 0, 0]
@@ -82,7 +82,22 @@ def analyze_model(model, output):
                            'mean_spectral_core_frobenius':float(fro[sel].mean()) if sel.any() else float('nan'),
                            'n_bins':int(sel.sum())})
     write_csv(gain_bands,output/'amplitude_gain_bands.csv')
+    response=gain*np.exp(1j*phase)
+    partner=(-np.arange(shape[0]))%shape[0]
+    width=bt.init_spatial_width
+    boundary=[0]+([shape[1]-1] if width%2==0 and shape[1]>1 else [])
+    r=response[:,:,boundary]
+    herr=float(np.linalg.norm(r-r[:,partner,:].conj())/max(np.linalg.norm(r),1e-12))
+    singular=np.linalg.svd(m.astype(np.float64),compute_uv=False)
+    lower=float(singular[-1]*gain.min()); upper=float(singular[0]*gain.max())
     write_json({'hidden_channels': bt.hidden_channels, 'grid': shape,
+                'hermitian_constraint':bt.hermitian_constraint, 'raw_response_hermitian_relative_error':herr,
+                'mixer_sigma_min':float(singular[-1]),'mixer_sigma_max':float(singular[0]),
+                'mixer_condition_number':float(singular[0]/singular[-1]) if singular[-1]>0 else None,
+                'spectral_core_gain_lower_bound':lower if bt.hermitian_constraint else None,
+                'spectral_core_gain_upper_bound':upper,
+                'spectral_core_condition_upper_bound':upper/lower if bt.hermitian_constraint and lower>0 else None,
+                'bound_scope':'Linear spectral core only, not nonlinear projections or complete network. Lower bound requires Hermitian-compatible response and full-rank mixer.',
                 'amplitude_gain_min': float(gain.min()), 'amplitude_gain_mean':float(gain.mean()),
                 'amplitude_gain_max':float(gain.max()), 'phase_abs_mean':float(np.abs(phase).mean()),
                 'note': 'Responses at the learned base grid. Low/high frequency prioritization requires measured input-conditioned responses and intervention testing; core Frobenius gain is not a clinical denoising claim.'},

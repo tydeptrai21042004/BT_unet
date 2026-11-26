@@ -31,8 +31,10 @@ def measure_binary(prob, target, threshold=0.5, boundary_tolerance=2):
     bp, bg = _boundary(pred), _boundary(gt)
     if not bp.any() and not bg.any():
         bf1, hd95, assd = 1.0, 0.0, 0.0
+        nsd = 1.0
     elif not bp.any() or not bg.any():
         bf1, hd95, assd = 0.0, float('nan'), float('nan')
+        nsd = 0.0
     else:
         dist_to_gt = ndimage.distance_transform_edt(~bg)
         dist_to_pred = ndimage.distance_transform_edt(~bp)
@@ -41,12 +43,13 @@ def measure_binary(prob, target, threshold=0.5, boundary_tolerance=2):
         precision_b = float((p2g <= boundary_tolerance).mean())
         recall_b = float((g2p <= boundary_tolerance).mean())
         bf1 = 2 * precision_b * recall_b / max(precision_b + recall_b, 1e-12)
+        nsd = float(((p2g <= boundary_tolerance).sum() + (g2p <= boundary_tolerance).sum()) / (p2g.size + g2p.size))
         hd95 = float(np.percentile(np.concatenate([p2g, g2p]), 95))
         assd = float((p2g.sum() + g2p.sum()) / (p2g.size + g2p.size))
     return dict(dice=float(dice), iou=float(iou),
                 precision=float(tp / (tp + fp + 1e-7)),
                 recall=float(tp / (tp + fn + 1e-7)),
-                mae=mae, boundary_f1=float(bf1), hd95_pixels=hd95,
+                mae=mae, boundary_f1=float(bf1), surface_dice=float(nsd), hd95_pixels=hd95,
                 assd_pixels=assd, lesion_fraction=float(gt.mean()),
                 empty_prediction=int(not pred.any()),
                 empty_ground_truth=int(not gt.any()),

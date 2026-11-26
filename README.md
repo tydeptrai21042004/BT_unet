@@ -128,3 +128,6 @@ queue and require additional approved data/code.**
 
 See `docs/KAGGLE_11H_ONE_BASED_RUN_GUIDE.md` for setup, data sources,
 Kaggle GPU/Internet settings, session output and final archive merging.
+
+## Active AUTO 324 revision
+See [BT_UNET_AUTO_324_REVISION.md](BT_UNET_AUTO_324_REVISION.md) for the revised proposal reruns, nine datasets, LinkNet, archive reuse, and the current Kaggle notebook. The [AUTO 300 guide](BT_UNET_AUTO_300_REVISION.md) is historical and documents dataset sources and metric additions.

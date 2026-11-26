@@ -8,6 +8,7 @@ from .registry import normalize_dataset_name
 
 
 SUPPORTED_BINARY_SEG_DATASETS = {
+    "isic2018",
     "kvasir_seg",
     "cvc_clinicdb",
     "etis",

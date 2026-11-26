@@ -16,6 +16,9 @@ class DatasetSpec:
 
 
 DATASET_SPECS = {
+    "isic2018": DatasetSpec(name="isic2018", aliases=("isic2018", "isic-2018", "isic_2018"),
+        canonical_dir="ISIC2018", default_download_url="https://huggingface.co/datasets/medicalai/MedSegDB/resolve/main/ISIC2018.zip",
+        official_source_url="https://challenge.isic-archive.com/data/", description="ISIC 2018 Task 1 skin lesion segmentation, labeled training set."),
     "kvasir_seg": DatasetSpec(
         name="kvasir_seg",
         aliases=("kvasir_seg", "kvasir-seg", "kvasir"),

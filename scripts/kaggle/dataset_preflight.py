@@ -33,12 +33,17 @@ OFFICIAL_MIRRORS = {
     ),
 }
 AUTO_DATASETS = ('kvasir_seg', 'kvasir_instrument', 'isbi2012', 'hyper_kvasir_seg', 'bus_uclm')
+EXTENDED_DATASETS = AUTO_DATASETS + ('cvc_clinicdb','cvc_colondb','etis','isic2018')
 
 
 def candidate_urls(dataset: str):
-    if dataset not in AUTO_DATASETS:
+    if dataset not in EXTENDED_DATASETS:
         raise ValueError(f'Unapproved AUTO dataset: {dataset}')
     spec = get_dataset_spec(dataset)
+    if dataset in EXTENDED_DATASETS[len(AUTO_DATASETS):]:
+        from scripts.kaggle.auto_acquire import URLS, KAGGLE
+        urls = tuple(URLS.get(dataset,())) + (("https://www.kaggle.com/api/v1/datasets/download/"+KAGGLE[dataset],) if dataset in KAGGLE else ())
+        return urls
     urls = (spec.default_download_url,) + spec.official_download_urls + OFFICIAL_MIRRORS.get(dataset, ())
     return tuple(dict.fromkeys(u for u in urls if u and u.startswith('https://')))
 
@@ -117,7 +122,7 @@ def check_sources(datasets=AUTO_DATASETS, *, max_total_seconds=110, probe=probe_
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--datasets',nargs='+',default=list(AUTO_DATASETS),choices=AUTO_DATASETS)
+    ap.add_argument('--datasets',nargs='+',default=list(AUTO_DATASETS),choices=EXTENDED_DATASETS)
     ap.add_argument('--output',type=Path,required=True)
     ap.add_argument('--seconds',type=int,default=110)
     ns=ap.parse_args()

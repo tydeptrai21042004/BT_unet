@@ -1,0 +1,5 @@
+Base: 0cbf0b01d56722489276ee2d6c341df23aabb3c6
+.............................................................            [100%]
+61 passed in 11.16s
+
+Live dataset downloads and GPU training not tested.

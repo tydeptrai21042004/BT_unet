@@ -14,7 +14,9 @@ from pathlib import Path
 
 MAIN = ('dice', 'iou', 'precision', 'recall', 'mae', 'loss')
 EXTRA = ('boundary_f1', 'hd95_pixels', 'assd_pixels', 'pixel_accuracy',
-         'specificity', 'balanced_accuracy', 'f2_score')
+         'specificity', 'balanced_accuracy', 'f2_score', 'surface_dice', 'mcc', 'foreground_area_error',
+         'brier', 'nll', 'ece', 'foreground_prediction_ece', 'auprc', 'complete_miss_rate',
+         'empty_prediction_rate', 'undefined_distance_rate')
 COLUMNS = ('experiment_number', 'experiment_id', 'dataset', 'model', 'variant',
            'seed', 'epochs', 'status') + MAIN + EXTRA
 
@@ -109,7 +111,13 @@ def export_completed(index, spec, evaluations, results_root, compact_root, metad
         sources = list(results_root.glob(pattern))
         if len(sources) == 1 and sources[0].stat().st_size < 10_000_000:
             shutil.copyfile(sources[0], experiment_dir / name)
-    analysis = results_root / 'analysis'
+    splits = results_root / 'split_manifests'
+    if splits.is_dir(): shutil.copytree(splits, experiment_dir/'split_manifests', dirs_exist_ok=True)
+    if metadata.get('retain_best_checkpoint'):
+        checkpoints = list(results_root.rglob('best.pt'))
+        if len(checkpoints)!=1: raise ValueError('Expected one best.pt to retain')
+        shutil.copy2(checkpoints[0], experiment_dir/'best.pt')
+    analysis = results_root / 'analysis' 
     if analysis.is_dir():
         budget = 15_000_000  # optional posthoc summaries only
         for source in sorted(analysis.rglob('*')):
@@ -145,6 +153,24 @@ def update_reports(base, compact_root, plan):
             complete.append(record)
         filled.append(record)
     suffix = 'AUTO'
+    efficiency=[]
+    for row in complete:
+        folder=compact_root/f'{int(row["experiment_number"]):04d}'
+        summary=folder/'evaluations'/row['dataset']/'summary.json'
+        benchmark=folder/'analysis'/'efficiency.json'
+        prov=folder/'provenance.json'
+        info=json.loads(summary.read_text()) if summary.is_file() else {}
+        bench=json.loads(benchmark.read_text()) if benchmark.is_file() else {}
+        training=json.loads(prov.read_text()).get('training_run',{}) if prov.is_file() else {}
+        values={**{k:row[k] for k in ('experiment_number','experiment_id','dataset','model','seed')},
+                **{k:info.get(k) for k in ('parameters_trainable','parameters_total','evaluation_seconds','eval_forward_seconds','eval_forward_images_per_second','eval_peak_allocated_mib')},
+                'actual_train_seconds':training.get('actual_train_seconds'),
+                **{k:bench.get(k) for k in ('latency_ms_median_batch','latency_ms_p95_batch','fps_images_per_second','gpu_peak_allocated_mib')},
+                'conv_linear_macs':bench.get('operation_counts',{}).get('conv_linear_macs'),
+                'fft_butterfly_complexity_units':bench.get('operation_counts',{}).get('fft_butterfly_complexity_units')}
+        efficiency.append(values)
+    if efficiency:
+        _write_csv(base/f'BT_UNET_EFFICIENCY_{suffix}.csv',efficiency,tuple(efficiency[0]))
     _write_csv(base / f'BT_UNET_PAPER_RESULTS_{suffix}.csv', filled)
     _write_csv(base / f'BT_UNET_COMPLETED_RESULTS_{suffix}.csv', complete)
     (base / f'BT_UNET_COMPLETED_RESULTS_{suffix}.json').write_text(
@@ -162,8 +188,8 @@ def update_reports(base, compact_root, plan):
     return complete
 
 
-def print_paper_result(record):
+def print_paper_result(record, total=165):
     values = ' | '.join(f'{k.upper()}={record[k]}' for k in MAIN + EXTRA)
-    print(f'[PAPER RESULT #{record["experiment_number"]:03d}/165] '
+    print(f'[PAPER RESULT #{record["experiment_number"]:03d}/{total}] '
           f'{record["dataset"]} {record["model"]} seed={record["seed"]} {values}', flush=True)
     print('[LATEX SIX CELLS] ' + ' & '.join('\\(' + record[k] + '\\)' for k in MAIN), flush=True)

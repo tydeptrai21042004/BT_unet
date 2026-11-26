@@ -12,6 +12,7 @@ from .baselines.pranet import PraNet, PraNetLite
 from .baselines.resunetpp import ResUNetPlusPlus, ResUNetPPAttentionGate, ResUNetPPDecoderBlock
 from .baselines.external_spectral import ExternalSpectralBaseline
 from .official.strict_external import VerifiedExternalSpectral
+from .baselines.linknet import LinkNet
 from .baselines.unet import UNet
 from .baselines.unetpp import UNetPlusPlus
 

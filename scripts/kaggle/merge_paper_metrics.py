@@ -24,13 +24,38 @@ if str(ROOT) not in sys.path:
 from scripts.kaggle.results_export import COLUMNS, MAIN, EXTRA, _metric, _write_csv
 
 
-def merge_paper_results(input_dir, output_dir, *, allow_mixed_commits=False):
+def merge_revised_results(input_dir, output_dir):
+    # Use the same identity gate as the training scheduler. Old proposal rows
+    # are intentionally omitted; only unchanged baseline rows can migrate.
+    from scripts.kaggle.reuse_completed import import_rows
+    from scripts.kaggle.results_export import update_reports
+    import tempfile
+    plan_path=ROOT/'BT_UNET_PLAN_AUTO_324.csv'
+    with plan_path.open(newline='') as f: plan=list(csv.DictReader(f))
+    output_dir=Path(output_dir);output_dir.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        compact=Path(tmp)/'compact'
+        reused=import_rows(input_dir,plan_path,compact)
+        update_reports(output_dir,compact,plan)
+        evidence={str(n):json.loads((compact/f'{n:04d}'/'reuse_provenance.json').read_text()) for n in sorted(reused)}
+    (output_dir/'MERGE_PROVENANCE_AUTO.json').write_text(json.dumps({'plan':'AUTO-324-H2','completed_count':len(reused),'missing_count':len(plan)-len(reused),'experiment_sources':evidence},indent=2)+'\n')
+    with (output_dir/'BT_UNET_PAPER_RESULTS_AUTO.csv').open(newline='') as f: return list(csv.DictReader(f))
+
+def merge_paper_results(input_dir, output_dir, *, allow_mixed_commits=False, revised_plan=False):
     input_dir, output_dir=Path(input_dir),Path(output_dir)
     archives=sorted(input_dir.glob('BT_UNET_SESSION_AUTO_*.zip'))
     if not archives:
         raise FileNotFoundError('No BT_UNET_SESSION_AUTO_*.zip archives found')
+    if not revised_plan:
+        for archive in archives:
+            with zipfile.ZipFile(archive) as z:
+                if json.loads(z.read('session_bundle_manifest.json')).get('total_experiments')==324:
+                    revised_plan=True;break
+    if revised_plan:
+        return merge_revised_results(input_dir,output_dir)
     plan=None
     plan_hash=None
+    plan_hashes=set()
     commits=set()
     data={}
     evidence={}
@@ -39,19 +64,19 @@ def merge_paper_results(input_dir, output_dir, *, allow_mixed_commits=False):
             manifest=json.loads(session.read('session_bundle_manifest.json'))
             if manifest.get('scope')!='AUTO':
                 raise ValueError('Not an AUTO session: '+archive.name)
-            if plan_hash is None:
-                plan_hash=manifest['plan_sha256']
-            if manifest['plan_sha256'] != plan_hash:
-                raise ValueError('Different 165-run experiment plans cannot be merged')
+            plan_hashes.add(manifest['plan_sha256'])
             commits.add(manifest.get('git_commit'))
             with session.open('BT_UNET_PLAN_AUTO.csv') as handle:
                 records=list(csv.DictReader(io.TextIOWrapper(handle,encoding='utf-8')))
-            if len(records)!=165:
-                raise ValueError(f'Expected 165 plan rows in {archive.name}')
-            if plan is None:
-                plan=records
-            elif plan != records:
+            if len(records) not in (165,300):
+                raise ValueError(f'Expected 165 or 300 plan rows in {archive.name}')
+            if plan is None or len(records)>len(plan):
+                if plan is not None and plan!=records[:len(plan)]: raise ValueError('Plan prefix mismatch')
+                plan=records; plan_hash=manifest['plan_sha256']
+            elif records != plan[:len(records)]:
                 raise ValueError(f'Experiment ordering or metadata changed in {archive.name}')
+            elif len(records)==len(plan) and manifest['plan_sha256']!=plan_hash:
+                raise ValueError('Equal-size plans have different hashes')
             listed=set(int(x) for x in manifest.get('completed_experiment_numbers',[]))
             found=set()
             for item in manifest.get('archives',[]):
@@ -116,10 +141,10 @@ def merge_paper_results(input_dir, output_dir, *, allow_mixed_commits=False):
     (output_dir/'MERGE_PROVENANCE_AUTO.json').write_text(json.dumps({
         'plan_sha256':plan_hash, 'commits':sorted(str(v) for v in commits),
         'source_archives':[x.name for x in archives], 'experiment_sources':evidence,
-        'completed_count':len(completed), 'missing_count':165-len(completed),
+        'completed_count':len(completed), 'missing_count':len(plan)-len(completed), 'source_plan_hashes':sorted(plan_hashes),
         'missing_test_loss_count':sum(r['loss']=='---' for r in completed),
     },indent=2)+'\n')
-    print('[MERGE] completed',len(completed),'of 165; missing test loss:',
+    print('[MERGE] completed',len(completed),'of',len(plan),'; missing test loss:',
           sum(r['loss']=='---' for r in completed))
     print('[MERGE OUTPUT]',output_dir/'BT_UNET_PAPER_RESULTS_AUTO.csv')
     return rows
@@ -130,8 +155,9 @@ def main():
     ap.add_argument('--input-dir',required=True)
     ap.add_argument('--output-dir',required=True)
     ap.add_argument('--allow-mixed-commits',action='store_true')
+    ap.add_argument('--revised-plan',action='store_true',help='Merge unchanged legacy baselines and versioned AUTO-324 runs')
     args=ap.parse_args()
-    merge_paper_results(args.input_dir,args.output_dir,allow_mixed_commits=args.allow_mixed_commits)
+    merge_paper_results(args.input_dir,args.output_dir,allow_mixed_commits=args.allow_mixed_commits,revised_plan=args.revised_plan)
 
 
 if __name__=='__main__':

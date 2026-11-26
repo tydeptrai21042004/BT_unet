@@ -12,9 +12,15 @@ from src.datasets.kvasir_seg_dataset import _resolve_image_mask_dirs, canonical_
 from src.datasets import load_binary_mask
 from PIL import Image
 
-EXPECTED = {'kvasir_instrument': 590, 'bus_uclm': 683}
-KAGGLE = {'kvasir_instrument':'debeshjha1/kvasirinstrument', 'bus_uclm':'orvile/bus-uclm-breast-ultrasound-dataset'}
+EXPECTED = {'kvasir_instrument': 590, 'bus_uclm': 683, 'cvc_clinicdb':612, 'cvc_colondb':380, 'etis':196, 'isic2018':2594}
+KAGGLE = {'kvasir_instrument':'debeshjha1/kvasirinstrument', 'bus_uclm':'orvile/bus-uclm-breast-ultrasound-dataset', 'cvc_clinicdb':'balraj98/cvcclinicdb', 'cvc_colondb':'longvil/cvc-colondb', 'etis':'nguyenvoquocduong/etis-laribpolypdb'}
 URLS = {'kvasir_instrument': ('https://datasets.simula.no/downloads/kvasir-instrument.zip', 'https://huggingface.co/datasets/medicalai/MedSegDB/resolve/main/Kvasir_Instrument.zip')}
+URLS.update({
+    'cvc_clinicdb': ('https://huggingface.co/datasets/medicalai/MedSegDB/resolve/main/CVC_ClinicDB.zip','https://www.kaggle.com/api/v1/datasets/download/orvile/cvc-clinicdb'),
+    'cvc_colondb': ('https://drive.google.com/file/d/1Y2z7FD5p5y31vkZwQQomXFRB0HutHyao/view?usp=sharing',),
+    'etis': ('https://drive.google.com/file/d/1Y2z7FD5p5y31vkZwQQomXFRB0HutHyao/view?usp=sharing',),
+    'isic2018': ('https://huggingface.co/datasets/medicalai/MedSegDB/resolve/main/ISIC2018.zip',),
+})
 HF_BUS = 'MedOtter/BUS-UCLM'
 
 def validate(root, name):
@@ -79,10 +85,20 @@ def acquire(name, cache):
     if local.is_dir():
         for p in local.iterdir():
             key = re.sub(r'[^a-z0-9]','',p.name.lower())
-            if ('kvasir' in key and 'instrument' in key) if name=='kvasir_instrument' else 'busuclm' in key:
+            tokens={'kvasir_instrument':('kvasirinstrument',), 'bus_uclm':('busuclm',),
+                    'cvc_clinicdb':('cvcclinicdb','clinicdb'), 'cvc_colondb':('cvccolondb','colondb'),
+                    'etis':('etis',), 'isic2018':('isic2018',)}[name]
+            if any(t in key for t in tokens):
                 sources.append(('kaggle_input', str(p)))
-    if name == 'bus_uclm': sources += [('hf_dataset', HF_BUS), ('kagglehub', KAGGLE[name])]
-    else: sources += [('kagglehub', KAGGLE[name])] + [('https_zip', u) for u in URLS[name]]
+    if name == 'bus_uclm': sources += [('hf_dataset', HF_BUS), ('https_zip','https://www.kaggle.com/api/v1/datasets/download/'+KAGGLE[name]), ('kagglehub', KAGGLE[name])]
+    elif name == 'kvasir_instrument': sources += [('kagglehub', KAGGLE[name])] + [('https_zip', u) for u in URLS[name]] + [('https_zip','https://www.kaggle.com/api/v1/datasets/download/'+KAGGLE[name])]
+    else:
+        if name in KAGGLE:
+            sources += [('https_zip','https://www.kaggle.com/api/v1/datasets/download/'+KAGGLE[name])]
+        sources += [('https_zip', u) for u in URLS.get(name,())]
+        if name in KAGGLE: sources += [('kagglehub', KAGGLE[name])]
+        if name=='isic2018': sources += [('isic_official_pair','https://isic-challenge-data.s3.amazonaws.com/2018/')]
+
     errors = []
     for kind, source in sources:
         print('[ACQUIRE]',name,kind,source,flush=True)
@@ -93,6 +109,10 @@ def acquire(name, cache):
                 elif kind == 'kagglehub':
                     import kagglehub
                     root = Path(kagglehub.dataset_download(source))
+                elif kind == 'isic_official_pair':
+                    root=tmp/'isic'; root.mkdir()
+                    for label, filename in [('images','ISIC2018_Task1-2_Training_Input.zip'),('masks','ISIC2018_Task1_Training_GroundTruth.zip')]:
+                        unpack(_maybe_download(source+filename,tmp/filename,verify=True),root/label)
                 elif kind == 'https_zip': root = unpack(_maybe_download(source,tmp/'source.zip',verify=True),tmp/'extracted')
                 else: root = Path(source)
                 try: root = find_root(root,name)

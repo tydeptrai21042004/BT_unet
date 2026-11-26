@@ -24,6 +24,7 @@ class KvasirPaths:
 
 
 COMMON_DATASET_DIR_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "isic2018": ("ISIC2018", "ISIC-2018", "isic2018"),
     "kvasir_seg": ("Kvasir-SEG", "kvasir-seg", "kvasir_seg", "Kvasir", "kvasir"),
     "cvc_clinicdb": ("CVC-ClinicDB", "CVC612", "cvc-clinicdb", "clinicdb", "ClinicDB", "cvc612"),
     "etis": ("ETIS-LaribPolypDB", "ETIS", "etis-larib", "etis_larib", "etis-laribpolypdb"),
